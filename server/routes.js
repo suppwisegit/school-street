@@ -57,7 +57,23 @@ router.get('/securities/:id', (req, res) => {
     const orders = db.prepare("SELECT * FROM orders WHERE user_id=? AND security_id=? AND status='open' ORDER BY id DESC").all(req.user.id, sec.id);
     mine = { amount: h ? h.amount : 0, avg_cost: h ? h.avg_cost : 0, open_orders: orders };
   }
-  res.json({ security: info, book: engine.bookSnapshot(sec.id), tape, mine, founder: sec.founder_id ? pubUser(q.userById.get(sec.founder_id)) : null, is_founder: req.user && sec.founder_id === req.user.id, lockup_until: sec.lockup_until });
+  res.json({
+    security: info, book: engine.bookSnapshot(sec.id), tape, mine,
+    stats: engine.computeStats(sec.id),
+    band: engine.priceBand(book),
+    founder: sec.founder_id ? pubUser(q.userById.get(sec.founder_id)) : null, is_founder: req.user && sec.founder_id === req.user.id, lockup_until: sec.lockup_until
+  });
+});
+
+// Order-Preview: exakter Book-Walk (10@50 + 10@55 = 1050), nicht ausführend.
+router.get('/securities/:id/preview', (req, res) => {
+  try {
+    const { side = 'buy', type = 'market', amount = 1, price = null } = req.query;
+    res.json(engine.previewOrder(req.user, {
+      security_id: Number(req.params.id), side, type,
+      amount: Number(amount), price: price != null ? Math.round(Number(price)) : null
+    }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 router.get('/securities/:id/candles', (req, res) => {
@@ -260,7 +276,9 @@ router.get('/admin/overview', auth.requireAdmin, (req, res) => res.json(adminOve
 
 router.get('/admin/settings', auth.requireAdmin, (req, res) => res.json({ settings: getSettings() }));
 router.put('/admin/settings', auth.requireAdmin, (req, res) => {
-  const allowed = ['fee_cent', 'income_cent', 'income_sec', 'start_capital', 'inactivity_sec', 'lockup_sec', 'mm_spread_bp', 'mm_size', 'mm_refresh_sec', 'mm_fee_exempt', 'cap_hours_needed'];
+  const allowed = ['fee_cent', 'income_cent', 'income_sec', 'start_capital', 'inactivity_sec', 'lockup_sec',
+    'mm_spread_bp', 'mm_size', 'mm_levels', 'mm_size_step', 'mm_step_bp', 'mm_refresh_sec', 'mm_fee_exempt',
+    'limit_band_pct', 'limit_band_cents', 'cap_hours_needed'];
   for (const [k, v] of Object.entries(req.body || {})) if (allowed.includes(k)) setSetting(k, Number(v));
   res.json({ settings: getSettings() });
 });

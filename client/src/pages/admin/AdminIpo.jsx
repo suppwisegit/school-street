@@ -73,7 +73,7 @@ export default function AdminIpo({ A, toast }) {
               </div>
             </div>
             {a.description ? <div className="hintbox" style={{ margin: '10px 0' }}>„{a.description}“</div> : null}
-            <div className="inputpair" style={{ marginTop: 8 }}>
+            <div className="previewgrid" style={{ marginTop: 10 }}>
               <Field label="IPO-Preis (Credits)" help={`= ${fmtC(ipo)} je Aktie`}>
                 <input className="input num" type="number" min="0.01" step="0.5" value={f.ipo_price} onChange={(e) => setForm(a.id, 'ipo_price', e.target.value)} />
               </Field>

@@ -66,10 +66,10 @@ export default function AdminOverview({ A, toast }) {
 
       <Card title="Stats" className="span2">
         <div className="statgrid admin">
-          <div className="stat"><div className="lbl">Trader</div><div className="val">{c.users ?? '–'}</div></div>
-          <div className="stat"><div className="lbl">Eingefroren</div><div className="val">{c.frozen ?? '–'}</div></div>
-          <div className="stat"><div className="lbl">Wertpapiere</div><div className="val">{c.securities ?? '–'}</div></div>
-          <div className="stat"><div className="lbl">Trades (24h)</div><div className="val">{c.trades_today ?? '–'}</div></div>
+          <div className="stat"><div className="lbl">Trader</div><div className="val num">{c.users ?? '–'}</div></div>
+          <div className="stat"><div className="lbl">Eingefroren</div><div className="val num">{c.frozen ?? '–'}</div></div>
+          <div className="stat"><div className="lbl">Wertpapiere</div><div className="val num">{c.securities ?? '–'}</div></div>
+          <div className="stat"><div className="lbl">Trades (24h)</div><div className="val num">{c.trades_today ?? '–'}</div></div>
           <div className="stat"><div className="lbl">Verbrannte Gebühren</div><div className="val num">{fmtC(c.fees_burned ?? 0)}</div></div>
         </div>
       </Card>

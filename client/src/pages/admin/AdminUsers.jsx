@@ -1,5 +1,6 @@
 // Admin: Nutzerverwaltung (Suche, Einfrieren, Löschen).
 import React, { useEffect, useState } from 'react';
+import { IconSearch } from '@tabler/icons-react';
 import { dateTimeStr, fmtC } from '../../api.js';
 import { Card, Chip, Empty, ErrorBox, Loading, Money, useToast } from '../../ui.jsx';
 
@@ -46,7 +47,10 @@ export default function AdminUsers({ A, toast }) {
   return (
     <Card title="Nutzerverwaltung">
       <form className="inputpair" onSubmit={search} style={{ marginBottom: 12 }}>
-        <input className="input" placeholder="Username suchen …" value={q} onChange={(e) => setQ(e.target.value)} />
+        <div className="searchwrap grow">
+          <IconSearch size={16} stroke={1.9} />
+          <input className="input" placeholder="Username suchen …" value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
         <button className="btn" style={{ whiteSpace: 'nowrap' }} type="submit">Suchen</button>
       </form>
       <ErrorBox>{err}</ErrorBox>

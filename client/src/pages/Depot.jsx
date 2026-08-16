@@ -140,9 +140,11 @@ export default function DepotTab() {
           <Empty>Keine offenen Orders.</Empty>
         ) : (
           openOrders.map((o) => (
-            <div className="row between" key={o.id} style={{ padding: '6px 0', borderBottom: '1px solid rgba(30,42,65,0.5)' }}>
+            <div className="row between" key={o.id} style={{ padding: '6px 0', borderBottom: '1px solid #17171d' }}>
               <div>
-                <b>{o.ticker}</b> <span className="muted small">{o.side === 'buy' ? 'Kauf' : 'Verkauf'} · {o.type === 'limit' ? fmtC(o.price) : 'Market'} · {o.filled}/{o.amount}</span>
+                <b>{o.ticker}</b>{' '}
+                <span className={`small ${o.side === 'buy' ? 'pos' : 'neg'}`}>{o.side === 'buy' ? 'Kauf' : 'Verkauf'}</span>{' '}
+                <span className="muted small num">{o.type === 'limit' ? fmtC(o.price) : 'Market'} · {o.filled}/{o.amount}</span>
               </div>
               <button className="btn sm danger" onClick={() => cancel(o)}>Storno</button>
             </div>
@@ -155,10 +157,10 @@ export default function DepotTab() {
           <Empty>Noch keine abgeschlossenen Orders.</Empty>
         ) : (
           history.map((o) => (
-            <div className="row between small" key={o.id} style={{ padding: '5px 0', borderBottom: '1px solid rgba(30,42,65,0.4)' }}>
+            <div className="row between small" key={o.id} style={{ padding: '5px 0', borderBottom: '1px solid #17171d' }}>
               <span>
                 <b>{o.ticker}</b> <span className={o.side === 'buy' ? 'pos' : 'neg'}>{o.side === 'buy' ? 'K' : 'V'}</span>
-                <span className="muted"> {o.filled}/{o.amount} {o.type === 'limit' ? '@ ' + fmtC(o.price) : 'Market'}</span>
+                <span className="muted num"> {o.filled}/{o.amount} {o.type === 'limit' ? '@ ' + fmtC(o.price) : 'Market'}</span>
               </span>
               <span className="muted num">{STATUS[o.status] || o.status} · {dateTimeStr(o.created_at)}</span>
             </div>

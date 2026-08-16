@@ -92,7 +92,7 @@ export default function AdminNews({ A, toast }) {
           news.slice(0, 15).map((n) => {
             const K = KIND_ICONS[n.kind] || KIND_ICONS.news;
             return (
-              <div key={n.id} className="row" style={{ gap: 10, padding: '8px 0', borderBottom: '1px solid rgba(30,42,65,0.5)' }}>
+              <div key={n.id} className="row" style={{ gap: 10, padding: '9px 0', borderBottom: '1px solid var(--border)' }}>
                 <span className={`icochip ${K.cls}`}><K.Icon stroke={1.8} /></span>
                 <div className="grow">
                   <b>{n.title}</b>

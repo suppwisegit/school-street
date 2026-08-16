@@ -139,19 +139,25 @@ const DEFAULT_SETTINGS = {
   start_capital: 1000000,       // 10.000 Credits Startkapital
   inactivity_sec: 21 * 24 * 3600, // Ghost-Account-Löschung nach 3 Wochen
   lockup_sec: 14 * 24 * 3600,   // 2 Wochen Founder-Lock-up
-  mm_spread_bp: 350,            // Market-Maker-Spread 3,5% (nur Liquidität, kein Trend)
-  mm_size: 10,                  // Stück pro MM-Quote (dünn => Kurssprünge möglich)
+  mm_spread_bp: 350,            // MM-Basis-Spread Stufe 0 (3,5% um den letzten Kurs)
+  mm_size: 15,                  // MM-Stückzahl auf Stufe 0 (engster Spread)
+  mm_levels: 5,                 // MM-Staffelung: Stufen je Seite (Ladder)
+  mm_size_step: 10,             // Stück-Zuwachs je Stufe (Stufe i: mm_size + i*mm_size_step)
+  mm_step_bp: 120,              // Abstands-Zuwachs je Stufe in Basispunkten (1,2%)
   mm_refresh_sec: 20,
   mm_fee_exempt: 1,
+  limit_band_pct: 15,           // Limit-Orders: max. 15% über/unter Referenzpreis
+  limit_band_cents: 10000,      // ... aber immer mindestens 100 Credits Spielraum
   cap_hours_needed: 120,        // 5 Tage über Schwelle => Kapitalerhöhung möglich
   idx_base_mcap: 0
 };
 const settingsCache = { ...DEFAULT_SETTINGS };
 {
+  // Defaults in die DB schreiben, ohne bestehende Werte anzufassen (IGNORE).
+  const ins = db.prepare('INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)');
+  for (const [k, v] of Object.entries(settingsCache)) ins.run(k, JSON.stringify(v));
   const rows = db.prepare('SELECT key, value FROM settings').all();
   for (const r of rows) settingsCache[r.key] = JSON.parse(r.value);
-  const ins = db.prepare('INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)');
-  for (const [k, v] of Object.entries(settingsCache)) if (!(k in rows.map(r => r.key))) ins.run(k, JSON.stringify(v));
 }
 function getSettings() { return { ...settingsCache }; }
 function setSetting(key, value) {

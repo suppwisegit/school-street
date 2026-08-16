@@ -5,10 +5,10 @@ import React, { useEffect, useRef } from 'react';
 import { createChart } from 'lightweight-charts';
 import { fmtC } from './api.js';
 
-const GREEN = '#00d68f';
-const RED = '#ff6459';
-const GRID = 'rgba(125, 138, 166, 0.10)';
-const LABEL = '#7d8aa6';
+const GREEN = '#0ecb81';
+const RED = '#f6465d';
+const GRID = 'rgba(255, 255, 255, 0.05)';
+const LABEL = '#77777f';
 
 // ---------------- Candle-Chart (Lightweight-Charts) ----------------
 export function CandleChart({ candles }) {
@@ -30,11 +30,11 @@ export function CandleChart({ candles }) {
         fontSize: 11,
       },
       grid: { vertLines: { color: GRID }, horzLines: { color: GRID } },
-      rightPriceScale: { borderColor: 'rgba(30, 42, 65, 0.9)' },
-      timeScale: { borderColor: 'rgba(30, 42, 65, 0.9)', timeVisible: true, secondsVisible: false, rightOffset: 2 },
+      rightPriceScale: { borderColor: '#232329' },
+      timeScale: { borderColor: '#232329', timeVisible: true, secondsVisible: false, rightOffset: 2 },
       crosshair: {
-        vertLine: { color: 'rgba(124, 92, 255, 0.55)', width: 1, style: 3, labelBackgroundColor: '#2e4064' },
-        horzLine: { color: 'rgba(124, 92, 255, 0.55)', width: 1, style: 3, labelBackgroundColor: '#2e4064' },
+        vertLine: { color: 'rgba(91, 157, 255, 0.5)', width: 1, style: 3, labelBackgroundColor: '#1b1b21' },
+        horzLine: { color: 'rgba(91, 157, 255, 0.5)', width: 1, style: 3, labelBackgroundColor: '#1b1b21' },
       },
       localization: {
         locale: 'de-DE',
@@ -84,7 +84,7 @@ export function CandleChart({ candles }) {
     vol.setData(data.map((c) => ({
       time: Math.floor(c.t / 1000),
       value: c.v || 0,
-      color: c.c >= c.o ? 'rgba(0, 214, 143, 0.28)' : 'rgba(255, 100, 89, 0.28)',
+      color: c.c >= c.o ? 'rgba(14, 203, 129, 0.3)' : 'rgba(246, 70, 93, 0.3)',
     })));
     chartRef.current?.timeScale().fitContent();
   }, [candles]);
@@ -155,7 +155,7 @@ export function LineChart({ points, showLabels = true }) {
 
     // Fläche
     const grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
-    grad.addColorStop(0, up ? 'rgba(0,214,143,0.26)' : 'rgba(255,100,89,0.26)');
+    grad.addColorStop(0, up ? 'rgba(14,203,129,0.24)' : 'rgba(246,70,93,0.24)');
     grad.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.beginPath();
     ctx.moveTo(x(0), padT + plotH);
@@ -208,7 +208,7 @@ export function Sparkline({ values, w = 76, h = 30, fill = true }) {
 
     if (fill) {
       const grad = ctx.createLinearGradient(0, 0, 0, h);
-      grad.addColorStop(0, up ? 'rgba(0,214,143,0.25)' : 'rgba(255,100,89,0.25)');
+      grad.addColorStop(0, up ? 'rgba(14,203,129,0.22)' : 'rgba(246,70,93,0.22)');
       grad.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.beginPath();
       ctx.moveTo(0, h);

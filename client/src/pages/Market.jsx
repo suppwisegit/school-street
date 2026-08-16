@@ -1,23 +1,26 @@
 // Markt-Tab: Liste aller Wertpapiere, live via WS (tickerAll alle 5s, ticker-Events).
 import React, { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useOutletContext } from 'react-router-dom';
 import { IconSearch } from '@tabler/icons-react';
 import { api, fmtC } from '../api.js';
 import { useWS } from '../ws.jsx';
-import { AvatarTile, Empty, ErrorBox, LivePrice, Pct, SkelRows } from '../ui.jsx';
+import { AvatarTile, Empty, ErrorBox, LivePrice, Pct, Skel, SkelRows } from '../ui.jsx';
 
 export default function MarketTab() {
+  const { ver } = useOutletContext() || {};
   const [secs, setSecs] = useState(null);
+  const [pf, setPf] = useState(null);
   const [err, setErr] = useState('');
   const [q, setQ] = useState('');
 
+  // Eigenes Vermögen + Cash kompakt über der Liste (ver = Reload nach Trades)
   useEffect(() => {
     let alive = true;
-    api('/api/securities')
-      .then((r) => { if (alive) setSecs(r.securities || []); })
-      .catch((e) => { if (alive) setErr(e.message); });
+    api('/api/portfolio')
+      .then((r) => { if (alive) setPf(r); })
+      .catch(() => {});
     return () => { alive = false; };
-  }, []);
+  }, [ver]);
 
   useWS((m) => {
     if (m.type === 'tickerAll' && Array.isArray(m.ticker)) setSecs(m.ticker);
@@ -36,6 +39,7 @@ export default function MarketTab() {
   if (err) return <ErrorBox>{err}</ErrorBox>;
   if (!secs) return (
     <div className="col" style={{ gap: 10 }}>
+      <Skel h={66} radius={16} />
       <div className="skel" style={{ height: 46, borderRadius: 12 }} />
       <SkelRows n={5} />
     </div>
@@ -43,6 +47,22 @@ export default function MarketTab() {
 
   return (
     <div className="col enter" style={{ gap: 10 }}>
+      {pf && (
+        <Link to="/depot" style={{ textDecoration: 'none', color: 'inherit' }}>
+          <div className="card tight hover row between">
+            <div>
+              <div className="lbl">Vermögen</div>
+              <div className="num" style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.02em' }}>
+                <LivePrice value={pf.net_worth} />
+              </div>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <div className="lbl">Cash</div>
+              <div className="num" style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-dim)' }}>{fmtC(pf.cash)}</div>
+            </div>
+          </div>
+        </Link>
+      )}
       <div className="searchwrap">
         <IconSearch size={16} stroke={1.9} />
         <input className="input" placeholder="Ticker oder Name suchen …" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Wertpapiere durchsuchen" />

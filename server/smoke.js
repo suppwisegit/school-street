@@ -130,8 +130,10 @@ const PW = 'test1234';
     const asksSorted = asks.every((p, i) => i === 0 || asks[i - 1] <= p);
     assert(bidsSorted, `bids nicht absteigend sortiert: ${bids}`);
     assert(asksSorted, `asks nicht aufsteigend sortiert: ${asks}`);
-    ok(`Markt: Orderbuch ${stock.ticker} sortiert (bids desc, asks asc)`, true,
-      `bid ${bids[0]} / ask ${asks[0]}`);
+    assert(asks.length >= 2 && bids.length >= 1,
+      `MM-Staffel erwartet (asks>=2, bids>=1): bids=${bids.length}, asks=${asks.length}`);
+    ok(`Markt: Orderbuch ${stock.ticker} sortiert + MM-Staffel sichtbar`, true,
+      `bids ${bids.length} / asks ${asks.length} Level, bid ${bids[0]} / ask ${asks[0]}`);
 
     const c = await GET(`/securities/${stock.id}/candles`);
     assertEq(c.status, 200, `candles status (${c.status})`);
@@ -194,14 +196,17 @@ const PW = 'test1234';
     ok('Handel: market buy füllt', true, `${trades.length} fill(s) zu ${cost}c + ${FEE}c Gebühr`);
   });
 
-  await section('Handel: weit entfernte Limit-Order + Storno-Refund', async () => {
+  await section('Handel: Limit-Order am Band-Rand + Storno-Refund', async () => {
     const before = await port(t1);
-    const r = await POST('/orders', { security_id: stock.id, side: 'buy', type: 'limit', price: 100, amount: 5 }, t1);
-    assertEq(r.status, 200, `far limit status (${r.json?.error})`);
-    assertEq(r.json.order.status, 'open', 'far limit: status');
-    assertEq(r.json.order.filled, 0, 'far limit: filled');
-    assertEq((r.json.trades || []).length, 0, 'far limit: keine Trades');
-    assertEq((await port(t1)).cash, before.cash - 500, 'far limit: Escrow 100x5 abgezogen');
+    const d = (await GET(`/securities/${stock.id}`, t1)).json;
+    const bandMin = d?.band?.min;
+    assert(Number.isInteger(bandMin) && bandMin > 0, `band.min fehlt: ${JSON.stringify(d?.band)}`);
+    const r = await POST('/orders', { security_id: stock.id, side: 'buy', type: 'limit', price: bandMin, amount: 5 }, t1);
+    assertEq(r.status, 200, `band-edge limit status (${r.json?.error})`);
+    assertEq(r.json.order.status, 'open', 'band-edge limit: status');
+    assertEq(r.json.order.filled, 0, 'band-edge limit: filled');
+    assertEq((r.json.trades || []).length, 0, 'band-edge limit: keine Trades');
+    assertEq((await port(t1)).cash, before.cash - bandMin * 5, 'band-edge limit: Escrow abgezogen');
     const ol = await GET('/orders', t1);
     const persisted = (ol.json?.orders || []).some(o => o.id === r.json.order.id && o.status === 'open');
     assert(persisted, 'Order nicht als open persistiert');
@@ -209,11 +214,56 @@ const PW = 'test1234';
     assertEq(c.status, 200, `cancel status (${c.json?.error})`);
     const after = await port(t1);
     assertEq(after.cash, before.cash, 'Storno: Cash-Refund exakt, Gebühr NICHT abgezogen');
-    ok('Handel: ferne Limit-Order bleibt offen, Storno-Refund exakt (ohne Gebühr)', true);
+    ok('Handel: Limit am Band-Rand bleibt offen, Storno-Refund exakt (ohne Gebühr)', true,
+      `band.min=${bandMin}`);
+  });
+
+  await section('Handel: Preis-Band & Order-Preview (Book-Walk)', async () => {
+    const d = (await GET(`/securities/${stock.id}`, t1)).json;
+    const { min, max } = d?.band || {};
+    assert(Number.isInteger(min) && Number.isInteger(max) && max > min, `band ungültig: ${JSON.stringify(d?.band)}`);
+
+    // Limit außerhalb des Bands -> abgelehnt (Anti-Manipulation)
+    const s1 = await POST('/orders', { security_id: stock.id, side: 'sell', type: 'limit', price: max + 100, amount: 1 }, t1);
+    assertEq(s1.status, 400, `band über max (${s1.status})`);
+    assert(/zu weit/.test(String(s1.json?.error || '')), `Meldung 'zu weit' erwartet: ${s1.json?.error}`);
+    let belowOk = null;
+    if (min > 100) { // unter min nur testbar, wenn der Band-Rand nicht schon am Tick-Boden liegt
+      const b1 = await POST('/orders', { security_id: stock.id, side: 'buy', type: 'limit', price: min - 100, amount: 1 }, t1);
+      assertEq(b1.status, 400, `band unter min (${b1.status})`);
+      assert(/zu weit/.test(String(b1.json?.error || '')), `Meldung 'zu weit' erwartet: ${b1.json?.error}`);
+      belowOk = true;
+    }
+    ok('Band: Limit außerhalb ±Band -> 400 "Preis zu weit"', true,
+      `erlaubt ${min}..${max}${belowOk ? '' : ' (unterer Rand am Tick-Boden)'}`);
+
+    // Preview: exakter Book-Walk über mehrere Levels (10@50 + 10@55 = 1050)
+    const asks = (d?.book?.asks || []).filter(x => x[1] > 0);
+    assert(asks.length >= 2, `für Walk-Test werden 2 Ask-Level gebraucht: ${JSON.stringify(asks)}`);
+    const askDepth = asks.reduce((a, x) => a + x[1], 0);
+    const want = asks[0][1] + Math.min(asks[1][1], 5); // füllt Level 1 komplett + Stück von Level 2
+    const pv = await GET(`/securities/${stock.id}/preview?side=buy&type=market&amount=${want}`, t1);
+    assertEq(pv.status, 200, `preview status (${pv.json?.error})`);
+    let left = want, expCost = 0;
+    for (const [p, q] of asks) { const take = Math.min(left, q); expCost += take * p; left -= take; if (left <= 0) break; }
+    assertEq(pv.json?.gross, expCost, 'preview: gross muss Level-für-Level walken');
+    assert((pv.json?.fills || []).length >= 2, `preview: >=2 Fills erwartet: ${JSON.stringify(pv.json?.fills)}`);
+    assertEq(pv.json?.available, askDepth, 'preview: available = Ask-Gesamttiefe');
+    assert(pv.json?.avg_price > asks[0][0], 'preview: Ø-Preis über Best Ask (Walk schlägt Through)');
+    ok('Preview: Book-Walk (Mengenstaffel, Ø-Preis, Tiefe) korrekt', true,
+      `${want} Stück = ${expCost}c, Ø ${pv.json?.avg_price}c, ${pv.json?.fills?.length} Fills`);
+
+    // Market-Order über verfügbare Tiefe -> ehrlich abgelehnt
+    const tooMuch = await POST('/orders', { security_id: stock.id, side: 'buy', type: 'market', amount: askDepth + 5 }, t1);
+    assertEq(tooMuch.status, 400, `market über Tiefe (${tooMuch.status})`);
+    assert(/Liquidit/.test(String(tooMuch.json?.error || '')), `Meldung 'Liquidität' erwartet: ${tooMuch.json?.error}`);
+    ok('Handel: Market-Buy über verfügbare Tiefe -> 400', true, tooMuch.json?.error);
   });
 
   await section('Handel: Fehlerfälle', async () => {
-    const r = await POST('/orders', { security_id: stock.id, side: 'buy', type: 'limit', price: 100000, amount: 10000 }, t1);
+    const d = (await GET(`/securities/${stock.id}`, t1)).json;
+    // Escrow reicht nicht: am Band-Rand (kein Fill) mit riesiger Menge
+    const r = await POST('/orders', { security_id: stock.id, side: 'buy', type: 'limit', price: d.band.min, amount: 100000 }, t1);
     assertEq(r.status, 400, `order ohne geld (${r.status})`);
     assert(!!r.json?.error, 'order ohne geld: keine Fehlermeldung');
     ok('Handel: Order ohne Geld -> 400', true, r.json?.error);
@@ -312,10 +362,10 @@ const PW = 'test1234';
     assertEq(ov.status, 200, `admin/overview (${ov.status})`);
     const tpos = (ov.json?.treasury?.positions || []).find(x => x.security_id === newSecId);
     assert(!!tpos, 'Treasury hat keine Position an der neuen Aktie');
-    // MM-Ask des Treasuries liegt mit mm_size=10 Stueck treuhaenderisch im Buch
-    assert(tpos.amount >= 390 && tpos.amount <= 400,
-      `Treasury sollte ~400 Float-Stuecke haben (400 minus MM-Escrow): ${tpos?.amount}`);
-    ok('IPO: Treasury haelt die Float-Stuecke (~400)', true, `amount=${tpos?.amount}`);
+    // MM-Ask-Staffel (bis zu 5 Stufen ~175 Stück) liegt treuhänderisch im Buch
+    assert(tpos.amount >= 225 && tpos.amount <= 400,
+      `Treasury sollte ~400 Float-Stücke haben (400 minus MM-Escrow): ${tpos?.amount}`);
+    ok('IPO: Treasury haelt die Float-Stuecke (~400 minus MM-Staffel)', true, `amount=${tpos?.amount}`);
   });
 
   // ======================= 7) DIVIDENDE =======================
@@ -324,9 +374,9 @@ const PW = 'test1234';
     const pv = await GET(`/admin/dividend/preview?security_id=${newSecId}&per_share=0.5`, tAdmin);
     assertEq(pv.status, 200, `preview (${pv.status}, ${pv.json?.error})`);
     assertEq(pv.json?.per_share, 50, 'preview: per_share (50c)');
-    // 1000 (u1) + 400 (Treasury) abzueglich ggf. im MM-Ask treuhaenderisch liegender 10 Stueck
-    assert([1390, 1400].includes(pv.json?.total_shares),
-      `preview: total_shares sollte 1400 (1000+400) sein: ${pv.json?.total_shares}`);
+    // 1000 (u1) + 400 (Treasury) abzueglich der im MM-Ask-Escrow liegenden Staffel (bis ~175)
+    assert(pv.json?.total_shares >= 1225 && pv.json?.total_shares <= 1400,
+      `preview: total_shares sollte ~1400 (1000+400 minus MM-Escrow) sein: ${pv.json?.total_shares}`);
     assertEq(pv.json?.total, pv.json.total_shares * 50, 'preview: total = total_shares x 50c');
     ok('Dividende: preview total = total_shares x 50c', true,
       `holders=${pv.json?.holders}, total_shares=${pv.json?.total_shares}, total=${pv.json?.total}`);
@@ -376,7 +426,7 @@ const PW = 'test1234';
   // ======================= 9) TREASURY / AP =======================
   await section('Treasury/AP', async () => {
     const r = await POST('/admin/treasury/order',
-      { security_id: stock.id, side: 'buy', type: 'limit', price: 100, amount: 5 }, tAdmin);
+      { security_id: stock.id, side: 'buy', type: 'limit', price: 100, amount: 1 }, tAdmin);
     assertEq(r.status, 200, `treasury order (${r.status}, ${r.json?.error})`);
     assertEq(r.json?.order?.status, 'open', 'treasury order: status');
     assertEq((r.json?.trades || []).length, 0, 'treasury order: darf nicht fuellen');
@@ -396,17 +446,17 @@ const PW = 'test1234';
 
   // ======================= 10) AUFSICHT =======================
   await section('Aufsicht (Freeze)', async () => {
-    const body = { security_id: stock.id, side: 'buy', type: 'limit', price: 100, amount: 1 };
     const f = await POST(`/admin/users/${u2id}/freeze`, { freeze: true }, tAdmin);
     assertEq(f.status, 200, `freeze (${f.status}, ${f.json?.error})`);
-    const fro = await POST('/orders', body, t2);
+    const fro = await POST('/orders', { security_id: stock.id, side: 'buy', type: 'limit', price: 100, amount: 1 }, t2);
     assertEq(fro.status, 403, `frozen order (${fro.status})`);
     assert(/eingefroren/i.test(String(fro.json?.error || '')), `Fehler sollte 'eingefroren' enthalten: ${fro.json?.error}`);
     ok('Aufsicht: freeze -> u2 Order -> 403 eingefroren', true, fro.json?.error);
 
     const u = await POST(`/admin/users/${u2id}/freeze`, { freeze: false }, tAdmin);
     assertEq(u.status, 200, `unfreeze (${u.status})`);
-    const o = await POST('/orders', body, t2);
+    const bandMin = (await GET(`/securities/${stock.id}`, t2)).json?.band?.min;
+    const o = await POST('/orders', { security_id: stock.id, side: 'buy', type: 'limit', price: bandMin, amount: 1 }, t2);
     assertEq(o.status, 200, `order nach unfreeze (${o.status}, ${o.json?.error})`);
     if (o.json?.order?.id) await DEL(`/orders/${o.json.order.id}`, t2);
     ok('Aufsicht: unfreeze -> Order geht wieder', true);

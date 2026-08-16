@@ -67,18 +67,32 @@ npm run smoke   # End-to-End-API-Test (startet eigenen Server auf Port 3100 mit 
   Orders (Maker) gilt. Selbstmatch wird verhindert.
 - **Limit-Orders** matchen sofort soweit möglich, Rest liegt im Buch.
   Gebot / Brief **jederzeit einsehbar** (aggregiert pro Preisstufe).
-- **Market-Orders** werden sofort ausgeführt, ein Rest verfällt.
+- **Market-Orders** werden sofort ausgeführt. Vorab-Validierung: es können nur
+  so viele Stück gekauft/verkauft werden, wie im Orderbuch liegen ("Nicht genug
+  Liquidität") — und nur so viele, wie das Cash hergibt (echter Book-Walk).
+- **Order-Preview:** `GET /api/securities/:id/preview` rechnet exakt über alle
+  Preisstufen (10@50 + 10@55 = 1050, niemals n×Bestpreis) — das Handels-Panel
+  zeigt Fills, Ø-Preis und Gesamtkosten live beim Tippen.
 - Geld & Aktien werden bei Orderaufgabe treuhänderisch **escrowed** —
   nichts kann ins Minus gehen, kein Geld aus dem Nichts (SQLite-Transaktionen,
   alles synchron in einem Prozess ⇒ keine Race Conditions).
 - **Gebühr (Geldverbrennung):** 20 Credits pro ausgeführter Order (Inflationsschutz).
 
+### Preis-Band (Manipulationsschutz)
+Limit-Preise von Schülern müssen innerhalb von
+`Kurs ± max(limit_band_cents, limit_band_pct%)` liegen (Default ±100 Credits
+bzw. ±15 %). Verhindert insane Kurssprünge und Pump & Dump über Limits.
+Treasury/Admin (AP-Arbitrage) sind ausgenommen.
+
 ### Kurse bewegen sich NUR durch Spieler-Trades
-Der Market-Maker (Staatskasse/Treasury) legt **passive Quoten** um den letzten
-Handelspreis (Spread + kleine Stückzahl). Nach jedem Trade re-zentriert er.
-Kursänderungen entstehen also ausschließlich durch Nachfrage/Angebot der
-Spieler — **News steuern nur indirekt**: "EIS zahlt Sonderdividende" → Schüler
-kaufen → Kurs steigt. Der Market-Maker erzeugt keine Trends.
+Der Market-Maker (Staatskasse/Treasury) legt eine **Staffel (Ladder) passiver
+Quotes** um den letzten Handelspreis: Stufe 0 eng am Kurs (mm_size Stück bei
+±mm_spread_bp/2), jede weitere Stufe weiter außen und größer
+(+mm_step_bp Abstand, +mm_size_step Stück). Schüler-Market-Orders fressen sich
+durch die Staffel: kleine Orders fillen knapp am Kurs, große schieben den
+Preis — Kurswechsel durch echte Nachfrage, aber mit Dämpfung. Nach jedem Trade
+re-zentriert der MM auf den neuen Kurs. Die Bid-Seite bindet max. 60 % der
+Staatskassen-Cash (Rest bleibt handlungsfähig für Arbitrage/Dividenden).
 
 ### Unternehmen & IPO
 1. Schüler stellt IPO-Antrag (Name, Ticker, Konzept) im Profil.
@@ -144,6 +158,10 @@ Abonnement), News und "dirty"-Signale (Portfolio/Orders neu laden).
 | `fee_cent` | Gebühr je ausgeführter Order (Cent) | 2000 |
 | `income_cent` / `income_sec` | Einkommen / Intervall | 100000 / 300 |
 | `lockup_sec` | Founder-Lock-up | 120 (Seed) / 14 Tage (Default) |
-| `mm_spread_bp` / `mm_size` | MM-Spread / Stück je Quote | 350 / 10 |
+| `mm_spread_bp` | MM-Basis-Spread Stufe 0 (Basispunkte) | 350 |
+| `mm_size` / `mm_size_step` | Stück Stufe 0 / Zuwachs je Stufe | 15 / 10 |
+| `mm_levels` / `mm_step_bp` | MM-Staffelstufen / Abstands-Zuwachs je Stufe | 5 / 120 |
+| `mm_refresh_sec` | MM-Recenter-Intervall | 20 |
+| `limit_band_pct` / `limit_band_cents` | Preis-Band für Limit-Orders (% / min. Cent) | 15 / 10000 |
 | `cap_hours_needed` | Stunden über Schwelle für Kapitalerhöhung | 120 |
 | `inactivity_sec` | Ghost-Account-Frist | 3 Wochen |

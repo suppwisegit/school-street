@@ -6,7 +6,7 @@ import { useWS } from '../ws.jsx';
 import { LineChart } from '../charts.jsx';
 import { Loading, Pct } from '../ui.jsx';
 
-const MEDAL_COLORS = ['#ffc24d', '#c7d2e4', '#d29a6a'];
+const MEDAL_COLORS = ['var(--gold)', '#c7d2e4', '#d29a6a'];
 
 export default function BoardPage() {
   const [data, setData] = useState(null);
@@ -68,7 +68,7 @@ export default function BoardPage() {
       <header className="board-head">
         <div>
           <div className="board-sub">SCHOOL-STREET · SCHULBÖRSE · LIVE</div>
-          <div className="board-title">SCHOOL-STREET INDEX</div>
+          <div className="board-title">SCHOOL-STREET <span className="street">INDEX</span></div>
         </div>
         <div>
           <div className={`board-index num ${idxUp ? 'pos' : 'neg'}`}>{(data.index ?? 0).toLocaleString('de-DE')}</div>

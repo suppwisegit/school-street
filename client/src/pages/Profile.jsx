@@ -263,7 +263,7 @@ function FounderCenter({ mine, reload, toast }) {
         mine.applications.map((a) => {
           const S = APP_STATUS[a.status];
           return (
-            <div className="row between" key={a.id} style={{ padding: '6px 0', borderBottom: '1px solid rgba(30,42,65,0.5)' }}>
+            <div className="row between" key={a.id} style={{ padding: '6px 0', borderBottom: '1px solid #17171d' }}>
               <div>
                 <b>{a.ticker}</b> <span className="muted small">{a.name}</span>
               </div>
