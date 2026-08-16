@@ -1,0 +1,17 @@
+{
+  "name": "school-street",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Schulbörsen-Simulation 'School-Street' – Prototyp",
+  "workspaces": ["server", "client"],
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,magenta \"node --watch server/index.js\" \"npm --prefix client run dev\"",
+    "build": "npm --prefix client run build",
+    "start": "node server/index.js",
+    "seed": "node server/seed.js",
+    "smoke": "node server/smoke.js"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
