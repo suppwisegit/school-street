@@ -8,6 +8,7 @@ import NewsTab from './pages/News.jsx';
 import ProfileTab from './pages/Profile.jsx';
 import AdminApp from './pages/Admin.jsx';
 import BoardPage from './pages/Board.jsx';
+import DeskPage from './pages/Desk.jsx';
 
 export default function App() {
   return (
@@ -21,6 +22,7 @@ export default function App() {
       </Route>
       <Route path="/admin" element={<AdminApp />} />
       <Route path="/board" element={<BoardPage />} />
+      <Route path="/desk" element={<DeskPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

@@ -23,7 +23,7 @@ const C = (x) => Math.round(x * 100);
 const adminPw = process.env.ADMIN_PASSWORD || 'ag123';
 const admin = auth.createUser('admin', adminPw, 'admin');
 console.log(`Admin: admin / ${adminPw}`);
-const treasury = auth.createUser('AG-Treasury', 'x', 'bank', 5000000);
+const treasury = auth.createUser('AG-Treasury', 'x', 'bank', getSettings().treasury_capital);
 
 const founders = [
   ['Max', 'Mensa Gourmet SE', 'MENSA', 'Frische(ere) Gerichte, secretly Bio. Die Kantine mit Anspruch.', 50, 1.18],
@@ -35,22 +35,23 @@ const founderUsers = {};
 const dummies = ['Anna', 'Ben', 'Chloe', 'David', 'Emre', 'Fiona', 'Gustav', 'Hannah'];
 const dummyUsers = dummies.map((n, i) => auth.createUser(n, 'demo123', 'user', C(20000 + i * 3000)));
 
-// --- IPOs ---
+// --- IPOs (1.000 Gründeraktien + 2.000 Stück Streubesitz für die Staatskasse) ---
 const stocks = [];
+const FLOAT = 2000;
 for (const [fname, name, ticker, desc, ipo, drift] of founders) {
   const u = auth.createUser(fname, 'demo123', 'user', C(10000));
   founderUsers[ticker] = u;
-  const sec = engine.listSecurity({ type: 'stock', ticker, name, description: desc, founder_id: u.id, ipo_price: C(ipo), total_shares: 1000 + 400 });
+  const sec = engine.listSecurity({ type: 'stock', ticker, name, description: desc, founder_id: u.id, ipo_price: C(ipo), total_shares: 1000 + FLOAT });
   db.prepare('UPDATE securities SET threshold_price=?, lockup_until=? WHERE id=?').run(C(ipo * 1.5), Date.now() + getSettings().lockup_sec * 1000, sec.id);
   sec.threshold_price = C(ipo * 1.5);
   engine.addHoldingPublic(u.id, sec.id, 1000, C(ipo));
-  engine.addHoldingPublic(treasury.id, sec.id, 400, C(ipo));
-  db.prepare('UPDATE users SET cash = cash + ? WHERE id=?').run(C(ipo) * 400, u.id);
-  db.prepare('UPDATE users SET cash = cash - ? WHERE id=?').run(C(ipo) * 400, treasury.id);
+  engine.addHoldingPublic(treasury.id, sec.id, FLOAT, C(ipo));
+  db.prepare('UPDATE users SET cash = cash + ? WHERE id=?').run(C(ipo) * FLOAT, u.id);
+  db.prepare('UPDATE users SET cash = cash - ? WHERE id=?').run(C(ipo) * FLOAT, treasury.id);
   engine.mmRecenter(engine.books.get(sec.id));
   stocks.push({ sec, drift, founder: u });
   const n = addNews('ipo', `🔔 IPO: ${name} (${ticker}) notiert zum Kurs ${ipo.toFixed(2)}`,
-    `${fname} geht mit ${name} an die Börse. 1.000 Gründeraktien, 400 Stück Streubesitz. Konzept: ${desc}`, sec.id);
+    `${fname} geht mit ${name} an die Börse. 1.000 Gründeraktien, ${FLOAT} Stück Streubesitz. Konzept: ${desc}`, sec.id);
 }
 
 // --- Kursverlauf durch echte Trades erzeugen (MM liefert nur Liquidität) ---

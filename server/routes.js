@@ -6,6 +6,7 @@ const engine = require('./engine');
 const etf = require('./etf');
 const auth = require('./auth');
 const jobs = require('./jobs');
+const bots = require('./bots');
 
 const router = express.Router();
 router.use(auth.middleware);
@@ -205,17 +206,15 @@ router.post('/companies/:id/request-capital-increase', auth.requireAuth, (req, r
   res.json({ ok: true });
 });
 
-// =========================== BOARD (öffentlich, für TV) ===========================
-router.get('/board', (req, res) => {
-  const stocks = db.prepare("SELECT * FROM securities WHERE type='stock' AND status='active'").all();
-  const etfs = db.prepare("SELECT * FROM securities WHERE type='etf' AND status='active'").all();
+// =========================== BOARD / DESK (öffentlich) ===========================
+// Index + Historie (5-Min-Buckets) — gemeinsam für /board und /desk.
+function boardIndexData(stocks) {
   const mcap = (sec) => { const b = engine.books.get(sec.id); return b ? b.last * sec.total_shares : 0; };
   const totalMcap = stocks.reduce((a, s) => a + mcap(s), 0);
   let base = getSettings().idx_base_mcap;
   if (!base && totalMcap > 0) { base = totalMcap; setSetting('idx_base_mcap', base); }
   const index = base ? Math.round(totalMcap / base * 1000) : 0;
 
-  // Index-Historie (Bucketed) aus price_history aller Aktien
   const bucket = 5 * 60 * 1000, range = 24 * 3600 * 1000;
   const rows = db.prepare(`SELECT security_id, ts, price FROM price_history WHERE ts>=? AND security_id IN (SELECT id FROM securities WHERE type='stock') ORDER BY ts ASC`).all(Date.now() - range);
   const lastP = new Map(), points = [];
@@ -236,10 +235,44 @@ router.get('/board', (req, res) => {
     for (const s of stocks) { const p = lastP.get(s.id) || s.ipo_price; mc += p * s.total_shares; }
     points.push({ t: cur, v: base ? Math.round(mc / base * 1000) : 0 });
   }
+  return { index, points: points.slice(-200) };
+}
+
+// Sparkline-Daten für Mini-Charts (Tops/Flops, Desk-Kacheln): letzte N Punkte.
+// Bucket-Größe passt sich der tatsächlichen Daten-Spanne an, damit auch junge
+// Wertpapiere sofort einen schönen Kurvenverlauf liefern.
+function sparkFor(secId, points = 40, spanMs = 12 * 3600 * 1000) {
+  const rows = db.prepare('SELECT ts, price FROM price_history WHERE security_id=? AND ts>=? ORDER BY ts ASC').all(secId, Date.now() - spanMs);
+  if (rows.length < 2) return rows.map((r) => r.price);
+  const dataSpan = Math.max(60000, rows[rows.length - 1].ts - rows[0].ts);
+  const bucket = Math.max(60000, Math.floor(dataSpan / points));
+  const m = new Map();
+  for (const r of rows) m.set(Math.floor(r.ts / bucket) * bucket, r.price);
+  return [...m.entries()].sort((a, b) => a - b).slice(-points).map(([, p]) => p);
+}
+
+// OHLC-Kerzen (bucketed) — wie /securities/:id/candles, als Helper für /desk.
+function bucketCandles(secId, range, bucket) {
+  const rows = db.prepare('SELECT ts, price, amount FROM price_history WHERE security_id=? AND ts>=? ORDER BY ts ASC').all(secId, Date.now() - range);
+  const buckets = new Map();
+  for (const r of rows) {
+    const b = Math.floor(r.ts / bucket) * bucket;
+    if (!buckets.has(b)) buckets.set(b, { t: b, o: r.price, h: r.price, l: r.price, c: r.price, v: 0 });
+    const c = buckets.get(b);
+    c.h = Math.max(c.h, r.price); c.l = Math.min(c.l, r.price); c.c = r.price; c.v += r.amount;
+  }
+  return [...buckets.values()];
+}
+
+router.get('/board', (req, res) => {
+  const stocks = db.prepare("SELECT * FROM securities WHERE type='stock' AND status='active'").all();
+  const etfs = db.prepare("SELECT * FROM securities WHERE type='etf' AND status='active'").all();
+  const { index, points } = boardIndexData(stocks);
 
   const tick = engine.tickerAll();
   const withChg = tick.filter(t => t.type === 'stock' || t.type === 'etf');
   const sorted = [...withChg].sort((a, b) => b.chg - a.chg);
+  const withSpark = (t) => ({ ...t, spark: sparkFor(t.id) });
   const lb = db.prepare("SELECT * FROM users WHERE role='user'").all().map(u => {
     let worth = u.cash;
     for (const h of db.prepare('SELECT * FROM holdings WHERE user_id=?').all(u.id)) {
@@ -250,10 +283,54 @@ router.get('/board', (req, res) => {
   }).sort((a, b) => b.worth - a.worth).slice(0, 10);
 
   res.json({
-    index, index_history: points.slice(-200),
-    tops: sorted.slice(0, 4), flops: sorted.slice(-4).reverse().filter(f => f.chg < 0),
+    index, index_history: points,
+    tops: sorted.slice(0, 4).map(withSpark),
+    flops: [...sorted].reverse().filter(f => f.chg < 0).slice(0, 4).map(withSpark),
     leaderboard: lb, news: q.newsAll.all(12),
     etf: etfs.map(e => ({ ...engine.tickerRow(e.id), nav: etf.nav(e.id) }))
+  });
+});
+
+// Trading-Desk (/desk): volle Markt-Ansicht für den PC — Kerzen je Wert, Stats,
+// Breadth, News, Leaderboard. ?range= in ms (Default 24h), ?bucket= in ms.
+router.get('/desk', (req, res) => {
+  const range = Math.min(30 * 86400000, Math.max(3600000, Number(req.query.range) || 86400000));
+  const bucket = Math.max(60000, Number(req.query.bucket) || Math.max(60000, Math.floor(range / 96)));
+  const stocks = db.prepare("SELECT * FROM securities WHERE type='stock' AND status='active'").all();
+  const { index, points } = boardIndexData(stocks);
+
+  const securities = db.prepare("SELECT * FROM securities WHERE status='active' ORDER BY id").all().map(sec => ({
+    id: sec.id, ticker: sec.ticker, name: sec.name, type: sec.type, description: sec.description,
+    total_shares: sec.total_shares, ipo_price: sec.ipo_price,
+    ...engine.tickerRow(sec.id),
+    stats: engine.computeStats(sec.id),
+    candles: bucketCandles(sec.id, range, bucket),
+    spark: sparkFor(sec.id),
+    nav: sec.type === 'etf' ? etf.nav(sec.id) : null
+  }));
+
+  const day = Date.now() - 24 * 3600 * 1000;
+  const tot = db.prepare('SELECT COUNT(*) n, SUM(amount) vol, SUM(price*amount) turnover FROM trades WHERE created_at>=?').get(day);
+  const advancers = securities.filter(s => s.type === 'stock' && s.chg > 0).length;
+  const decliners = securities.filter(s => s.type === 'stock' && s.chg < 0).length;
+  const lb = db.prepare("SELECT * FROM users WHERE role='user'").all().map(u => {
+    let worth = u.cash;
+    for (const h of db.prepare('SELECT * FROM holdings WHERE user_id=?').all(u.id)) {
+      const b = engine.books.get(h.security_id);
+      if (b) worth += h.amount * b.last;
+    }
+    return { username: u.username, worth };
+  }).sort((a, b) => b.worth - a.worth).slice(0, 10);
+
+  res.json({
+    index, index_history: points,
+    securities,
+    breadth: { advancers, decliners, unchanged: stocks.length - advancers - decliners, stocks: stocks.length },
+    totals: { trades24: tot.n || 0, volume24: tot.vol || 0, turnover24: tot.turnover || 0 },
+    news: q.newsAll.all(15),
+    leaderboard: lb,
+    range, bucket,
+    generated_at: Date.now()
   });
 });
 
@@ -262,7 +339,9 @@ function adminOverview() {
   const t = engine.treasury();
   const counts = {
     users: db.prepare("SELECT COUNT(*) c FROM users WHERE role='user'").get().c,
-    frozen: db.prepare("SELECT COUNT(*) c FROM users WHERE frozen=1").get().c,
+    bots: db.prepare('SELECT COUNT(*) c FROM users WHERE is_bot=1').get().c,
+    bots_running: bots.status().running,
+    frozen: db.prepare('SELECT COUNT(*) c FROM users WHERE frozen=1').get().c,
     securities: db.prepare("SELECT COUNT(*) c FROM securities WHERE status='active'").get().c,
     trades_today: db.prepare('SELECT COUNT(*) c FROM trades WHERE created_at>=?').get(Date.now() - 86400000).c,
     fees_burned: db.prepare("SELECT COUNT(*) c FROM orders WHERE fee_charged=1 AND is_mm=0").get().c * getSettings().fee_cent
@@ -277,7 +356,13 @@ router.get('/admin/overview', auth.requireAdmin, (req, res) => res.json(adminOve
 router.get('/admin/settings', auth.requireAdmin, (req, res) => res.json({ settings: getSettings() }));
 router.put('/admin/settings', auth.requireAdmin, (req, res) => {
   const allowed = ['fee_cent', 'income_cent', 'income_sec', 'start_capital', 'inactivity_sec', 'lockup_sec',
+    'treasury_capital',
     'mm_spread_bp', 'mm_size', 'mm_levels', 'mm_size_step', 'mm_step_bp', 'mm_refresh_sec', 'mm_fee_exempt',
+    'mm_cash_budget_pct', 'mm_noise_bp', 'mm_jitter_bp', 'mm_size_jitter', 'mm_inv_target_pct', 'mm_inv_skew_bp',
+    'mm_guard_pct', 'mm_guard_widen', 'mm_replenish_min', 'mm_replenish_qty', 'mm_replenish_price_mult',
+    'mm_recap_min_pct', 'mm_recap_to_pct', 'mm_vol_ref', 'mm_vol_mult_max',
+    'etf_auto', 'etf_auto_threshold_pct', 'etf_auto_units', 'etf_auto_interval_sec', 'etf_auto_max_units',
+    'bot_count', 'bot_activity', 'bot_tick_sec', 'bot_fast',
     'limit_band_pct', 'limit_band_cents', 'cap_hours_needed'];
   for (const [k, v] of Object.entries(req.body || {})) if (allowed.includes(k)) setSetting(k, Number(v));
   res.json({ settings: getSettings() });
@@ -295,7 +380,7 @@ router.post('/admin/ipo/:id/approve', auth.requireAdmin, (req, res) => {
   if (q.secByTicker.get(app.ticker)) return res.status(409).json({ error: 'Ticker inzwischen vergeben' });
   const ipo = Math.round(Number(req.body?.ipo_price) * 100);
   const founderShares = Math.floor(Number(req.body?.founder_shares) || 1000);
-  const floatShares = Math.floor(Number(req.body?.float_shares) ?? 400);
+  const floatShares = Math.floor(Number(req.body?.float_shares) ?? 2000);
   const thresholdMult = Number(req.body?.threshold_mult) || 1.5;
   if (!(ipo > 0) || founderShares < 1 || floatShares < 0) return res.status(400).json({ error: 'Ungültige Parameter' });
   const founder = q.userById.get(app.user_id);
@@ -402,8 +487,9 @@ router.post('/admin/dividend', auth.requireAdmin, (req, res) => {
 // ---- Nutzer-Verwaltung ----
 router.get('/admin/users', auth.requireAdmin, (req, res) => {
   const search = `%${String(req.query.q || '')}%`;
-  const rows = db.prepare(`SELECT id, username, cash, realized_pl, frozen, last_active, role FROM users
-    WHERE role='user' AND (username LIKE ?) ORDER BY cash DESC LIMIT 100`).all(search);
+  const botFilter = req.query.bots === '1' ? 'AND is_bot=1' : req.query.bots === '0' ? 'AND is_bot=0' : '';
+  const rows = db.prepare(`SELECT id, username, cash, realized_pl, frozen, last_active, role, is_bot FROM users
+    WHERE role='user' ${botFilter} AND (username LIKE ?) ORDER BY cash DESC LIMIT 200`).all(search);
   res.json({ users: rows.map(u => ({ ...u, worth: u.cash })) });
 });
 router.post('/admin/users/:id/freeze', auth.requireAdmin, (req, res) => {
@@ -481,6 +567,18 @@ router.post('/admin/etf/:id/redeem-units', auth.requireAdmin, (req, res) => {
     bus.emit({ type: 'news', news: n });
     res.json({ ok: true, ...r });
   } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// ---- Bot-Modus (Testspiel mit virtuellen Tradern) ----
+router.get('/admin/bots', auth.requireAdmin, (req, res) => res.json(bots.status()));
+router.post('/admin/bots/start', auth.requireAdmin, (req, res) => res.json(bots.start()));
+router.post('/admin/bots/stop', auth.requireAdmin, (req, res) => res.json(bots.stop()));
+router.put('/admin/bots/settings', auth.requireAdmin, (req, res) => {
+  const b = req.body || {};
+  if (b.bot_activity != null) bots.setActivity(b.bot_activity);
+  if (b.bot_tick_sec != null) bots.setTickSec(b.bot_tick_sec);
+  if (b.bot_fast != null) bots.setFast(!!b.bot_fast);
+  res.json(bots.status());
 });
 
 // ---- AP-Handelsterminal: Treasury handelt als normaler Marktteilnehmer ----

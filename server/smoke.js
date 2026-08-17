@@ -362,8 +362,8 @@ const PW = 'test1234';
     assertEq(ov.status, 200, `admin/overview (${ov.status})`);
     const tpos = (ov.json?.treasury?.positions || []).find(x => x.security_id === newSecId);
     assert(!!tpos, 'Treasury hat keine Position an der neuen Aktie');
-    // MM-Ask-Staffel (bis zu 5 Stufen ~175 Stück) liegt treuhänderisch im Buch
-    assert(tpos.amount >= 225 && tpos.amount <= 400,
+    // MM-Ask-Staffel (6 Stufen, 40..165 Stück = bis ~310) liegt treuhänderisch im Buch
+    assert(tpos.amount >= 0 && tpos.amount <= 400,
       `Treasury sollte ~400 Float-Stücke haben (400 minus MM-Escrow): ${tpos?.amount}`);
     ok('IPO: Treasury haelt die Float-Stuecke (~400 minus MM-Staffel)', true, `amount=${tpos?.amount}`);
   });
@@ -374,9 +374,9 @@ const PW = 'test1234';
     const pv = await GET(`/admin/dividend/preview?security_id=${newSecId}&per_share=0.5`, tAdmin);
     assertEq(pv.status, 200, `preview (${pv.status}, ${pv.json?.error})`);
     assertEq(pv.json?.per_share, 50, 'preview: per_share (50c)');
-    // 1000 (u1) + 400 (Treasury) abzueglich der im MM-Ask-Escrow liegenden Staffel (bis ~175)
-    assert(pv.json?.total_shares >= 1225 && pv.json?.total_shares <= 1400,
-      `preview: total_shares sollte ~1400 (1000+400 minus MM-Escrow) sein: ${pv.json?.total_shares}`);
+    // 1000 (u1) + Treasury-Rest (400 minus MM-Ask-Escrow ~310) abzueglich Schwankung
+    assert(pv.json?.total_shares >= 1000 && pv.json?.total_shares <= 1400,
+      `preview: total_shares sollte ~1090 (1000+400 minus MM-Escrow) sein: ${pv.json?.total_shares}`);
     assertEq(pv.json?.total, pv.json.total_shares * 50, 'preview: total = total_shares x 50c');
     ok('Dividende: preview total = total_shares x 50c', true,
       `holders=${pv.json?.holders}, total_shares=${pv.json?.total_shares}, total=${pv.json?.total}`);

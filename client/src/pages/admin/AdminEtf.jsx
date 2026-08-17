@@ -53,14 +53,16 @@ function ConfirmBtn({ label, armedLabel = 'Sicher? Erneut klicken', onConfirm, c
 export default function AdminEtf({ A, toast }) {
   const [etfData, setEtfData] = useState(null); // {etfs, stocks, treasury_positions}
   const [allSecs, setAllSecs] = useState([]);
+  const [autoCfg, setAutoCfg] = useState(null); // Settings für AUTO-AP-Chip
   const [etfId, setEtfId] = useState('');
   const [err, setErr] = useState('');
 
   const load = useCallback(async () => {
     try {
-      const [e, s] = await Promise.all([A('/api/admin/etf'), A('/api/securities')]);
+      const [e, s, st] = await Promise.all([A('/api/admin/etf'), A('/api/securities'), A('/api/admin/settings')]);
       setEtfData(e);
       setAllSecs(s.securities || []);
+      setAutoCfg(st.settings || null);
       setEtfId((cur) => cur || String(e.etfs?.[0]?.id || ''));
       setErr('');
     } catch (e2) { setErr(e2.message); }
@@ -81,6 +83,11 @@ export default function AdminEtf({ A, toast }) {
             <span className="etfx-sub">Authorized Participant · NAV-Arbitrage · Marktdata alle 20 s</span>
           </div>
         </div>
+        {autoCfg && (
+          <span className={`etfx-autochip ${Number(autoCfg.etf_auto) ? 'on' : 'off'}`} title="Auto-Arbitrage (Einstellungen → ETF Auto-Arbitrage)">
+            AUTO AP {Number(autoCfg.etf_auto) ? `aktiv · ±${autoCfg.etf_auto_threshold_pct}%` : 'aus'}
+          </span>
+        )}
         {etfs.length > 0 && (
           <select className="etfx-select etfx-headsel" value={etfId} onChange={(e) => setEtfId(e.target.value)}>
             {etfs.map((e) => <option key={e.id} value={e.id}>{e.ticker} · {e.name}</option>)}

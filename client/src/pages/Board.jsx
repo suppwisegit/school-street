@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { IconTrendingDown, IconTrendingUp } from '@tabler/icons-react';
 import { api, fmtC } from '../api.js';
 import { useWS } from '../ws.jsx';
-import { LineChart } from '../charts.jsx';
+import { LineChart, Sparkline } from '../charts.jsx';
 import { Loading, Pct } from '../ui.jsx';
 
 const MEDAL_COLORS = ['var(--gold)', '#c7d2e4', '#d29a6a'];
@@ -34,8 +34,10 @@ export default function BoardPage() {
     } else if (m.type === 'tickerAll' && Array.isArray(m.ticker)) {
       setData((d) => {
         if (!d) return d;
+        const prevSpark = new Map([...(d.tops || []), ...(d.flops || [])].map((t) => [t.id, t.spark]));
         const withChg = m.ticker.filter((t) => t.type === 'stock' || t.type === 'etf');
         const sorted = [...withChg].sort((a, b) => b.chg - a.chg);
+        const keepSpark = (t) => ({ ...t, spark: t.spark || prevSpark.get(t.id) });
         const etfs = (d.etf || []).map((e) => {
           const t = m.ticker.find((x) => x.id === e.id);
           if (!t) return e;
@@ -43,7 +45,7 @@ export default function BoardPage() {
           const premium = e.nav && nav ? (t.last / nav - 1) * 100 : (e.nav?.premium_pct ?? 0);
           return { ...e, last: t.last, chg: t.chg, nav: e.nav ? { ...e.nav, last: t.last, premium_pct: premium } : e.nav };
         });
-        return { ...d, tops: sorted.slice(0, 4), flops: [...sorted].reverse().filter((f) => f.chg < 0).slice(0, 4), etf: etfs };
+        return { ...d, tops: sorted.slice(0, 4).map(keepSpark), flops: [...sorted].reverse().filter((f) => f.chg < 0).slice(0, 4).map(keepSpark), etf: etfs };
       });
     }
   });
@@ -88,9 +90,10 @@ export default function BoardPage() {
             <h3 className="pos row" style={{ gap: 6 }}><IconTrendingUp size={15} stroke={2.2} /> TOPS</h3>
             <div className="tilegrid">
               {(data.tops || []).map((t) => (
-                <div className="tile" key={'t' + t.id}>
+                <div className="tile wide" key={'t' + t.id}>
                   <div className="row between"><span className="tk">{t.ticker}</span><span className="pc num pos">+{Number(t.chg || 0).toFixed(2)}%</span></div>
                   <div className="px num">{fmtC(t.last)}</div>
+                  {t.spark?.length > 1 && <Sparkline values={t.spark} w={150} h={40} />}
                 </div>
               ))}
               {(!data.tops || data.tops.length === 0) && <div className="muted">Noch keine Kurse.</div>}
@@ -100,9 +103,10 @@ export default function BoardPage() {
             <h3 className="neg row" style={{ gap: 6 }}><IconTrendingDown size={15} stroke={2.2} /> FLOPS</h3>
             <div className="tilegrid">
               {(data.flops || []).map((t) => (
-                <div className="tile" key={'f' + t.id}>
+                <div className="tile wide" key={'f' + t.id}>
                   <div className="row between"><span className="tk">{t.ticker}</span><span className="pc num neg">{Number(t.chg || 0).toFixed(2)}%</span></div>
                   <div className="px num">{fmtC(t.last)}</div>
+                  {t.spark?.length > 1 && <Sparkline values={t.spark} w={150} h={40} />}
                 </div>
               ))}
               {(!data.flops || data.flops.length === 0) && <div className="muted">Heute keine Verlierer.</div>}

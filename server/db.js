@@ -131,6 +131,9 @@ CREATE TABLE IF NOT EXISTS dividends (
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `);
 
+// Migration: virtuelle Trader (Testspiel-Modus) — normales Konto, nur gekennzeichnet.
+try { db.exec('ALTER TABLE users ADD COLUMN is_bot INTEGER NOT NULL DEFAULT 0'); } catch (e) { /* Spalte existiert schon */ }
+
 // ---------- Settings (im RAM gecached) ----------
 const DEFAULT_SETTINGS = {
   fee_cent: 2000,               // 20 Credits Geldverbrennung pro ausgeführter Order
@@ -139,17 +142,43 @@ const DEFAULT_SETTINGS = {
   start_capital: 1000000,       // 10.000 Credits Startkapital
   inactivity_sec: 21 * 24 * 3600, // Ghost-Account-Löschung nach 3 Wochen
   lockup_sec: 14 * 24 * 3600,   // 2 Wochen Founder-Lock-up
-  mm_spread_bp: 350,            // MM-Basis-Spread Stufe 0 (3,5% um den letzten Kurs)
-  mm_size: 15,                  // MM-Stückzahl auf Stufe 0 (engster Spread)
-  mm_levels: 5,                 // MM-Staffelung: Stufen je Seite (Ladder)
-  mm_size_step: 10,             // Stück-Zuwachs je Stufe (Stufe i: mm_size + i*mm_size_step)
+  treasury_capital: 50000000,   // 500.000 Credits Startkapital der Staatskasse
+  mm_spread_bp: 300,            // MM-Basis-Spread Stufe 0 (3% um den letzten Kurs)
+  mm_size: 40,                  // MM-Stückzahl auf Stufe 0 (engster Spread)
+  mm_levels: 6,                 // MM-Staffelung: Stufen je Seite (Ladder)
+  mm_size_step: 25,             // Stück-Zuwachs je Stufe (Stufe i: mm_size + i*mm_size_step)
   mm_step_bp: 120,              // Abstands-Zuwachs je Stufe in Basispunkten (1,2%)
-  mm_refresh_sec: 20,
+  mm_refresh_sec: 15,
   mm_fee_exempt: 1,
+  mm_cash_budget_pct: 0.9,      // Anteil der Treasury-Cash für die Bid-Seite (Escrow)
+  mm_noise_bp: 18,              // Random-Walk-Noise auf der Referenz (organisches Buch)
+  mm_jitter_bp: 60,             // Abstands-Jitter je Stufe: ausgefranste statt perfekt Treppen
+  mm_size_jitter: 0.35,         // Größen-Jitter ±35% je Stufe
+  mm_inv_target_pct: 0.2,       // Ziel-Bestand des MM: Anteil der Gesamtaktien
+  mm_inv_skew_bp: 200,          // Inventory-Skew: max. Quote-Verschiebung je Bestandslage
+  mm_guard_pct: 6,              // Momentum-Bremse: ab ±6% Bewegung in 10 Min breiter quotieren
+  mm_guard_widen: 1.7,          // ... Streckungsfaktor der Quote-Abstände bei Bremsung
+  mm_replenish_min: 120,        // Nachplatzierung, wenn Treasury-Restbestand darunter fällt
+  mm_replenish_qty: 1000,       // ... so viele neue Aktien werden platziert
+  mm_replenish_price_mult: 1.15,// ... aber nur, wenn Kurs > IPO-Preis × Faktor
+  mm_recap_min_pct: 0.05,       // Zentralbank-Notkredit ab 5% des Treasury-Startkapitals
+  mm_recap_to_pct: 0.12,        // ... füllt die Staatskasse auf 12% auf (max. 1x/Stunde)
+  mm_vol_ref: 0.01,             // Referenz-Volatilität: 1% => volF=1 (Spread-Skalierung)
+  mm_vol_mult_max: 2.8,         // Maximal-Faktor: wilder Markt => bis zu 2.8x so breite Quotes
+  etf_auto: 0,                  // ETF-Auto-Arbitrage: AP schließt Premium/Discount automatisch
+  etf_auto_threshold_pct: 10,   // ... ab ±10% Abweichung Kurs <-> NAV
+  etf_auto_units: 2,            // ... Basis-Units je Aktion (skaliert mit Abweichung)
+  etf_auto_max_units: 25,       // ... Obergrenze der dynamischen Units
+  etf_auto_interval_sec: 10,    // ... min. Abstand zwischen Aktionen je ETF
   limit_band_pct: 15,           // Limit-Orders: max. 15% über/unter Referenzpreis
   limit_band_cents: 10000,      // ... aber immer mindestens 100 Credits Spielraum
   cap_hours_needed: 120,        // 5 Tage über Schwelle => Kapitalerhöhung möglich
-  idx_base_mcap: 0
+  idx_base_mcap: 0,
+  bot_count: 100,               // Testspiel-Modus: so viele virtuelle Trader
+  bot_activity: 40,             // 0-100: erwartete Trades je Tick = activity/100 * 2
+  bot_tick_sec: 3,              // Bot-Takt in Sekunden
+  bot_fast: 0,                  // Fast-Mode: Trades je Tick ×100 (Deckel 200) — für MM-/Pattern-Tests
+  bot_running: 0                // 1 = Modus läuft (überlebt Server-Neustart)
 };
 const settingsCache = { ...DEFAULT_SETTINGS };
 {
@@ -158,6 +187,12 @@ const settingsCache = { ...DEFAULT_SETTINGS };
   for (const [k, v] of Object.entries(settingsCache)) ins.run(k, JSON.stringify(v));
   const rows = db.prepare('SELECT key, value FROM settings').all();
   for (const r of rows) settingsCache[r.key] = JSON.parse(r.value);
+}
+// Einmal-Migration: altes Default-Intervall der ETF-Auto-Arbitrage (60s) war zu
+// träge für große Abweichungen — auf den neuen Default 10s anheben.
+if (settingsCache.etf_auto_interval_sec === 60) {
+  settingsCache.etf_auto_interval_sec = 10;
+  db.prepare('INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)').run('etf_auto_interval_sec', JSON.stringify(10));
 }
 function getSettings() { return { ...settingsCache }; }
 function setSetting(key, value) {

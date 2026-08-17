@@ -1,8 +1,10 @@
 // Hintergrund-Jobs: Wocheneinkommen, Market-Maker-Refresh, Ghost-Accounts,
-// Kapitalerhöhungs-Beobachtung (Kurs über Schwelle), Preis-Sampler für Charts.
+// Kapitalerhöhungs-Beobachtung (Kurs über Schwelle), Preis-Sampler für Charts,
+// ETF-Auto-Arbitrage (AP-Automatik, wenn etf_auto=1).
 const { db, getSettings, q, addNews } = require('./db');
 const bus = require('./bus');
 const engine = require('./engine');
+const etf = require('./etf');
 
 const state = { last_income: 0, timers: [] };
 
@@ -26,7 +28,9 @@ function payIncome() {
 function ghostCleanup() {
   const s = getSettings();
   const cutoff = Date.now() - s.inactivity_sec;
-  const ghosts = db.prepare("SELECT * FROM users WHERE role='user' AND last_active < ?").all(cutoff);
+  // Bots (is_bot) sind ausgenommen: sie "loggen sich nie ein" und dürfen vom
+  // Ghost-Cleanup nicht weggeräumt werden.
+  const ghosts = db.prepare("SELECT * FROM users WHERE role='user' AND is_bot=0 AND last_active < ?").all(cutoff);
   if (!ghosts.length) return;
   const t = engine.treasury();
   if (!t) return;
@@ -80,6 +84,17 @@ function priceSampler() {
   for (const book of engine.books.values()) q.phIns.run(book.sec.id, now, book.last, 0);
 }
 
+// Orders-Aufräumjob: Der MM-Refresh erzeugt ~4.000 Order-Zeilen pro Stunde
+// (Quote legen -> cancel -> neu legen). Alte MM-Orders haben keinerlei Wert,
+// Spieler-Orders bleiben 14 Tage als Historie erhalten. Hält die Tabelle klein,
+// damit Serverstart (loadEngine) und Admin-Ansichten schnell bleiben.
+function pruneOrders() {
+  const day = 86400000;
+  const r1 = db.prepare("DELETE FROM orders WHERE is_mm = 1 AND created_at < ?").run(Date.now() - day);
+  const r2 = db.prepare("DELETE FROM orders WHERE is_mm = 0 AND status = 'canceled' AND created_at < ?").run(Date.now() - 14 * day);
+  if (r1.changes + r2.changes > 0) console.log(`[Job prune-orders] ${r1.changes} MM- + ${r2.changes} Spieler-Orders entfernt`);
+}
+
 // Ein fehlgeschlagener Job darf niemals die ganze Börse mitreißen
 function safe(name, fn) {
   return () => {
@@ -94,12 +109,20 @@ function startJobs() {
     setInterval(safe('income', () => {
       if (Date.now() - state.last_income >= getSettings().income_sec * 1000) payIncome();
     }), 1000),
-    setInterval(safe('mm-refresh', () => engine.mmRefreshAll()), getSettings().mm_refresh_sec * 1000),
+    // MM-Refresh: schneller Loop, aber jedes Buch hat seinen eigenen gestaffelten
+    // Takt (mm_refresh_sec ± 30%) — die Bücher wirken lebendig, nicht synchron.
+    setInterval(safe('mm-refresh', () => engine.mmRefreshAll()), 3000),
     setInterval(safe('ghost-cleanup', ghostCleanup), 10 * 60 * 1000),
     setInterval(safe('capital-watch', capitalWatch), 60 * 60 * 1000),
-    setInterval(safe('price-sampler', priceSampler), 30 * 1000)
+    setInterval(safe('price-sampler', priceSampler), 30 * 1000),
+    setInterval(safe('prune-orders', pruneOrders), 60 * 60 * 1000),
+    setInterval(safe('etf-auto', () => {
+      const r = etf.autoArbitrage();
+      if (r.length) console.log(`[Job etf-auto] ${r.map((a) => `${a.ticker} ${a.action} x${a.units} (${a.premium_pct}%)`).join(', ')}`);
+    }), 5000)
   ];
   engine.mmRefreshAll();
+  safe('prune-orders', pruneOrders)();
 }
 
 module.exports = { startJobs, payIncome, ghostCleanup, state };

@@ -263,3 +263,12 @@ input.etfx-input[type="number"] { appearance: textfield; -moz-appearance: textfi
   .etfx-frow { grid-template-columns: 1fr; }
   .etfx-wrap { padding: 12px; }
 }
+
+/* Auto-AP-Statuschip im Terminal-Kopf */
+.etfx-autochip {
+  font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 5px 12px; border-radius: 999px; white-space: nowrap; align-self: center;
+  border: 1px solid;
+}
+.etfx-autochip.on { color: #0ecb81; border-color: rgba(14, 203, 129, 0.45); background: rgba(14, 203, 129, 0.1); }
+.etfx-autochip.off { color: #77777f; border-color: #26262e; background: transparent; }

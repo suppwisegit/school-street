@@ -67,6 +67,9 @@ export default function AdminOverview({ A, toast }) {
       <Card title="Stats" className="span2">
         <div className="statgrid admin">
           <div className="stat"><div className="lbl">Trader</div><div className="val num">{c.users ?? '–'}</div></div>
+          <div className="stat"><div className="lbl">Virtuelle Bots</div><div className="val num">
+            {c.bots ?? '–'}{c.bots_running ? <span className="chip green" style={{ marginLeft: 6, fontSize: 11 }}>aktiv</span> : null}
+          </div></div>
           <div className="stat"><div className="lbl">Eingefroren</div><div className="val num">{c.frozen ?? '–'}</div></div>
           <div className="stat"><div className="lbl">Wertpapiere</div><div className="val num">{c.securities ?? '–'}</div></div>
           <div className="stat"><div className="lbl">Trades (24h)</div><div className="val num">{c.trades_today ?? '–'}</div></div>

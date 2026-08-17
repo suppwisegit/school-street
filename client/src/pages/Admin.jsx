@@ -1,7 +1,7 @@
 // Admin-Panel der Investment AG: eigenes Login (nur role=admin), Tab-Navigation.
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  IconBuildingBank, IconCoin, IconFileText, IconNews, IconRocket, IconSettings, IconTrendingUp, IconUsers
+  IconBuildingBank, IconCoin, IconFileText, IconNews, IconRobot, IconRocket, IconSettings, IconTrendingUp, IconUsers
 } from '@tabler/icons-react';
 import { api, ADMIN_TOKEN_KEY } from '../api.js';
 import { ErrorBox, Field, Loading, useToast } from '../ui.jsx';
@@ -12,6 +12,7 @@ import AdminNews from './admin/AdminNews.jsx';
 import AdminDividend from './admin/AdminDividend.jsx';
 import AdminEtf from './admin/AdminEtf.jsx';
 import AdminUsers from './admin/AdminUsers.jsx';
+import AdminBots from './admin/AdminBots.jsx';
 import AdminSettings from './admin/AdminSettings.jsx';
 
 const TABS = [
@@ -22,6 +23,7 @@ const TABS = [
   { key: 'dividend', label: 'Dividende', Icon: IconCoin, comp: AdminDividend },
   { key: 'etf', label: 'ETF / AP', Icon: IconBuildingBank, comp: AdminEtf },
   { key: 'users', label: 'Nutzer', Icon: IconUsers, comp: AdminUsers },
+  { key: 'bots', label: 'Bots', Icon: IconRobot, comp: AdminBots },
   { key: 'settings', label: 'Einstellungen', Icon: IconSettings, comp: AdminSettings }
 ];
 

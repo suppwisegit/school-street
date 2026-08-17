@@ -23,17 +23,37 @@ const SECTIONS = [
     ]
   },
   {
-    title: 'Market-Maker (Liquidität)',
+    title: 'Market-Maker V2 (Liquidität)',
     wide: true,
-    hint: 'Der Market Maker der Staatskasse legt eine Preistreppe (Ladder) um den letzten Kurs: Stufe 0 notiert direkt am Kurs, jede weitere Stufe liegt weiter außen und bietet mehr Stück. So finden auch große Orders Gegenparteien.',
+    hint: 'Der Market Maker der Staatskasse quotet wie ein echter Liquidity Provider: Abstände & Größen je Stufe sind zufällig ausgefranst (Jitter), die Quotes wandern auf einem kleinen Random Walk um den letzten Kurs, und die Spreads skalieren KONTINUIERLICH mit der gemessenen Volatilität — ruhiger Markt = enge Quotes & große Stückzahlen (viel Handel), wilder Markt = breite Quotes & kleine Stückzahlen (Schutz), so wie bei großen Börsen. Dazu: Inventory-Skew (hoher Bestand drückt die Quotes, niedriger hebt sie), Momentum-Bremse als Extrem-Circuit-Breaker, automatische Nachplatzierung bei Float-Mangel und faires Cash-Budget je Wertpapier.',
     fields: [
-      { key: 'mm_spread_bp', label: 'Basis-Spread (Basispunkte)', help: 'Abstand zwischen Geld- und Briefkurs auf Stufe 0. 350 = 3,5 % um den letzten Kurs.' },
-      { key: 'mm_levels', label: 'Stufen je Seite', help: 'Tiefe der Treppe: so viele Preisstufen bietet der MM je Seite an (Default 5).' },
-      { key: 'mm_step_bp', label: 'Abstands-Zuwachs je Stufe (Basispunkte)', help: 'Jede weitere Stufe liegt so viel weiter vom Kurs entfernt. 120 = 1,2 % mehr Abstand pro Stufe (Default 120).' },
-      { key: 'mm_size', label: 'Stückzahl auf Stufe 0', help: 'Menge, die der MM zum engesten Preis kauft und verkauft (Default 15). Kleine Werte = dünnere Liquidität.' },
-      { key: 'mm_size_step', label: 'Stück-Zuwachs je Stufe', help: 'Jede weitere Stufe bietet so viele Stück mehr: Stufe i hat mm_size + i × mm_size_step (Default 10).' },
-      { key: 'mm_refresh_sec', label: 'Refresh-Intervall (Sekunden)', help: 'Wie oft der MM seine Quoten um den letzten Kurs neu zentriert.' },
-      { key: 'mm_fee_exempt', label: 'MM gebührenfrei?', type: 'bool', help: 'Zahlt die Staatskasse für ihre eigenen Liquiditäts-Orders keine Ordergebühr?' }
+      { key: 'mm_spread_bp', label: 'Basis-Spread (Basispunkte)', help: 'Abstand zwischen Geld- und Briefkurs auf Stufe 0 bei Normal-Volatilität. 300 = 3 % um den Referenzkurs (Default 300).' },
+      { key: 'mm_levels', label: 'Stufen je Seite', help: 'Tiefe der Staffel: so viele Preisstufen bietet der MM je Seite an (Default 6).' },
+      { key: 'mm_step_bp', label: 'Abstands-Zuwachs je Stufe (Basispunkte)', help: 'Jede weitere Stufe liegt im Mittel so viel weiter vom Kurs entfernt (Default 120).' },
+      { key: 'mm_jitter_bp', label: 'Abstands-Jitter (Basispunkte)', help: 'Zufällige Extra-Abstände je Stufe: aus einer glatten Treppe wird ein realistisch ausgefranstes Buch (Default 60).' },
+      { key: 'mm_size', label: 'Stückzahl auf Stufe 0', help: 'Menge, die der MM zum engesten Preis kauft und verkauft (Default 40).' },
+      { key: 'mm_size_step', label: 'Stück-Zuwachs je Stufe', help: 'Jede weitere Stufe bietet im Mittel so viele Stück mehr (Default 25).' },
+      { key: 'mm_size_jitter', label: 'Größen-Jitter (0–1)', help: 'Zufällige Abweichung der Stückzahlen je Stufe. 0.35 = ±35 % (Default 0.35).' },
+      { key: 'mm_vol_ref', label: 'Referenz-Volatilität (0–1)', help: 'Gemessene Volatilität (σ der letzten Kursänderungen), bei der der Spread genau dem Basis-Spread entspricht. Kleinerer Wert = MM reagiert empfindlicher. Default 0.01 = 1 %.' },
+      { key: 'mm_vol_mult_max', label: 'Max. Spread-Faktor', help: 'Obergrenze der Volatilitäts-Streckung: bei Sturm quotet der MM höchstens so viel mal so breit (Default 2.8; ruhig wird bis 0.7× enger).' },
+      { key: 'mm_refresh_sec', label: 'Refresh-Intervall (Sekunden)', help: 'Mittlerer Takt je Wert — jedes Buch recentert gestaffelt (±30 %), nie alle gleichzeitig (Default 15).' },
+      { key: 'mm_inv_skew_bp', label: 'Inventory-Skew (Basispunkte)', help: 'Maximale Quote-Verschiebung je nach Bestandslage: viel Bestand ⇒ tiefer quoten (abbauen), wenig Bestand ⇒ höher (Default 200).' },
+      { key: 'mm_guard_pct', label: 'Momentum-Bremse ab (%)', help: 'Extrem-Circuit-Breaker: Hat sich der Kurs in 10 Minuten stärker bewegt, verbreitert der MM zusätzlich (Default 6 %).' },
+      { key: 'mm_replenish_qty', label: 'Nachplatzierung: Stückzahl', help: 'Ist der Treasury-Bestand unter den Mindestwert gefallen UND der Kurs klar über dem IPO, platziert die Staatskasse so viele neue Aktien dazu (News-Event, Default 1000).' },
+      { key: 'mm_replenish_price_mult', label: 'Nachplatzierung ab Faktor', help: 'Nachplatzierung nur, wenn Kurs > IPO-Preis × Faktor — schwache Kurse werden nicht verwässert (Default 1.15).' },
+      { key: 'mm_cash_budget_pct', label: 'Cash-Anteil für Bid-Seite (0–1)', help: 'Anteil der Treasury-Cash, den der MM insgesamt in Kauf-Quotes (Escrow) bindet — fair verteilt auf alle Wertpapiere. Default 0.9.' },
+      { key: 'mm_fee_exempt', label: 'MM gebührenfrei?', type: 'bool', boolLabels: ['Ja – gebührenfrei', 'Nein – Gebühr zahlen'], help: 'Zahlt die Staatskasse für ihre eigenen Liquiditäts-Orders keine Ordergebühr?' }
+    ]
+  },
+  {
+    title: 'ETF Auto-Arbitrage (AP-Automatik)',
+    hint: 'Der AP-Algorithmus der Investment AG klebt ETF-Kurse an den NAV — mit zwei Instrumenten wie echte Authorized Participanten: (1) NAV-Pegging: Ab halber Schwelle platziert die Staatskasse AP-Kauforders unterhalb des NAV (bei Discount) bzw. AP-Verkauforders oberhalb (bei Premium) — Spieler, die dagegen handeln, ziehen den Kurs sofort Richtung NAV. (2) Creation/Redemption: Ab voller Schwelle passt der AP seinen Bestand an, mit dynamisch mit der Abweichung skalierenden Units. Jede Bestands-Aktion erscheint max. 1× pro Minute als News.',
+    fields: [
+      { key: 'etf_auto', label: 'Auto-Arbitrage aktiv?', type: 'bool', boolLabels: ['An – automatisch eingreifen', 'Aus – nur manuell (AP-Terminal)'], help: 'Prüft alle 5 Sekunden alle ETFs und greift automatisch ein.' },
+      { key: 'etf_auto_threshold_pct', label: 'Schwelle (± %)', help: 'Ab dieser Abweichung zwischen Kurs und NAV wird vollständig eingegriffen; ab der Hälfte bereits NAV-Pegging-Quotes gesetzt (Default 10 %).' },
+      { key: 'etf_auto_units', label: 'Basis-Units je Aktion', help: 'Grundgröße je Creation/Redemption — skaliert automatisch mit der Abweichung (Default 2).' },
+      { key: 'etf_auto_max_units', label: 'Max. Units je Aktion', help: 'Obergrenze der dynamischen Skalierung: bei riesigen Abweichungen werden bis zu so viele Units auf einmal geschaffen/eingelöst (Default 25).' },
+      { key: 'etf_auto_interval_sec', label: 'Mindestabstand (Sekunden)', help: 'Mindestens so lange wartet der Algorithmus zwischen zwei Creation/Redemption-Aktionen je ETF — die Peg-Quotes wirken unabhängig davon sofort (Default 10).' }
     ]
   },
   {
@@ -48,7 +68,8 @@ const SECTIONS = [
     title: 'Sonstiges',
     fields: [
       { key: 'start_capital', label: 'Startkapital (Cent)', help: (s) => `Guthaben bei Registrierung. Aktueller Wert: ${fmtC(s.start_capital)} Credits.` },
-      { key: 'inactivity_sec', label: 'Inaktivität bis Löschung (Sekunden)', help: 'Konten ohne Aktivität werden gelöscht, das Vermögen fällt an die Staatskasse. 1814400 = 3 Wochen.' }
+      { key: 'treasury_capital', label: 'Staatskasse: Startkapital (Cent)', help: (s) => `Startguthaben der Investment AG — die Liquiditäts-Reserve des Market Makers. Wirkt bei Neuanlage/Re-Seed. Aktueller Wert: ${fmtC(s.treasury_capital)} Credits.` },
+      { key: 'inactivity_sec', label: 'Inaktivität bis Löschung (Sekunden)', help: 'Konten ohne Aktivität werden gelöscht, das Vermögen fällt an die Staatskasse. 1814400 = 3 Wochen. Virtuelle Trader (Bots) sind ausgenommen.' }
     ]
   }
 ];
@@ -110,8 +131,9 @@ export default function AdminSettings({ A, toast }) {
             value={Number(val) === 1 ? '1' : '0'}
             onChange={(e) => setSettings((s) => ({ ...s, [f.key]: e.target.value }))}
           >
-            <option value="1">Ja – gebührenfrei</option>
-            <option value="0">Nein – Gebühr zahlen</option>
+            {(f.boolLabels || ['Ja', 'Nein']).map((lbl, i) => (
+              <option key={i} value={i === 0 ? '1' : '0'}>{lbl}</option>
+            ))}
           </select>
         ) : (
           <input

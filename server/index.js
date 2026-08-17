@@ -33,7 +33,7 @@ function bootstrap() {
     console.log('==========================================================');
   }
   if (!db.prepare("SELECT * FROM users WHERE role='bank' LIMIT 1").get()) {
-    auth.createUser('AG-Treasury', require('crypto').randomBytes(16).toString('hex'), 'bank', 5000000);
+    auth.createUser('AG-Treasury', require('crypto').randomBytes(16).toString('hex'), 'bank', getSettings().treasury_capital);
   }
 }
 
@@ -62,6 +62,8 @@ wss.on('connection', (ws, req) => {
   const user = auth.userForToken(url.searchParams.get('token'));
   clients.set(ws, { userId: user ? user.id : null, subs: new Set() });
   ws.send(JSON.stringify({ type: 'hello', user: user ? { id: user.id, username: user.username, role: user.role } : null }));
+  // Kurse sofort pushen — sonst warten neue Clients bis zu 5s auf den ersten Ticker
+  try { ws.send(JSON.stringify({ type: 'tickerAll', ticker: engine.tickerAll() })); } catch {}
   ws.on('message', (raw) => {
     try {
       const m = JSON.parse(raw);
@@ -105,6 +107,10 @@ if (getSettings().idx_base_mcap === 0) {
   }
 }
 jobs.startJobs();
+
+// Testspiel-Modus (virtuelle Trader) fortsetzen, falls er beim Herunterfahren lief
+const bots = require('./bots');
+if (getSettings().bot_running) bots.start(true);
 
 server.listen(PORT, HOST, () => {
   console.log('');

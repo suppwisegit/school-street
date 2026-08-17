@@ -9,16 +9,19 @@ export default function AdminUsers({ A, toast }) {
   const [users, setUsers] = useState(null);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [botFilter, setBotFilter] = useState(''); // '' = alle, '0' = echte, '1' = Bots
 
-  const load = async (query) => {
+  const load = async (query, bots) => {
     try {
-      const r = await A('/api/admin/users', { params: { q: query ?? q } });
+      const r = await A('/api/admin/users', { params: { q: query ?? q, bots: bots ?? botFilter } });
       setUsers(r.users || []);
       setErr('');
     } catch (e) { setErr(e.message); }
   };
 
-  useEffect(() => { load(''); }, []);
+  useEffect(() => { load('', ''); }, []);
+
+  const setFilter = (f) => { setBotFilter(f); load('', f); };
 
   const search = (e) => {
     e.preventDefault();
@@ -51,6 +54,11 @@ export default function AdminUsers({ A, toast }) {
           <IconSearch size={16} stroke={1.9} />
           <input className="input" placeholder="Username suchen …" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
+        <div className="tabs" style={{ margin: 0 }}>
+          <button type="button" className={botFilter === '' ? 'on' : ''} onClick={() => setFilter('')}>Alle</button>
+          <button type="button" className={botFilter === '0' ? 'on' : ''} onClick={() => setFilter('0')}>Echte</button>
+          <button type="button" className={botFilter === '1' ? 'on' : ''} onClick={() => setFilter('1')}>Bots</button>
+        </div>
         <button className="btn" style={{ whiteSpace: 'nowrap' }} type="submit">Suchen</button>
       </form>
       <ErrorBox>{err}</ErrorBox>
@@ -63,7 +71,7 @@ export default function AdminUsers({ A, toast }) {
             <tbody>
               {users.map((u) => (
                 <tr key={u.id}>
-                  <td><b>{u.username}</b></td>
+                  <td><b>{u.username}</b>{u.is_bot ? ' ' : ''}{u.is_bot ? <Chip blue>Bot</Chip> : null}</td>
                   <td className="r num">{fmtC(u.cash)}</td>
                   <td className="r"><Money c={u.realized_pl} colored signed /></td>
                   <td className="muted small">{dateTimeStr(u.last_active)}</td>

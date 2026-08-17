@@ -10,12 +10,12 @@
 //                                  -> Preview & ETF-Arbitrage nutzen dieselbe Logik
 //   6. Matching                   Taker frisst sich durch die Gegenseite
 //   7. Order-API                  placeOrder/cancelOrder: validieren -> escrowen -> matchen
-//   8. Market-Maker               Staffel-Quotes (Ladder) um den letzten Kurs
+//   8. Market-Maker V2            adaptiver Liquidity Provider (Jitter, Skew, Nachplatzierung)
 //   9. Marktdaten                 Ticker, Stats (Volumen/VWAP/Spread/...), Broadcasts
 //
 // WICHTIG (Vorgabe): Der Market-Maker erzeugt KEINE Kurstrends. Er legt nur
-// passive Staffel-Quotes um den LETZTEN HANDELSPREIS. Kursbewegungen entstehen
-// ausschließlich durch Spieler-Trades — der MM re-zentriert nach jedem Trade.
+// passive Quotes um den LETZTEN HANDELSPREIS (mit organischem Jitter und
+// Bestands-Skew). Kursbewegungen entstehen durch Trades der Teilnehmer.
 // ============================================================================
 const { db, getSettings, q, addNews } = require('./db');
 const bus = require('./bus');
@@ -110,9 +110,12 @@ function addHolding(userId, secId, delta, price = null) {
 }
 
 // Gebühr = Geldverbrennung pro AUSGEFÜHRTER Order (MM optional befreit).
+// Clamp: nie mehr abbuchen als da ist — sonst rutschen Konten ins Minus.
 function chargeFee(order) {
   if (order.fee_charged || order.is_mm && getSettings().mm_fee_exempt) return;
-  const fee = getSettings().fee_cent;
+  const cash = q.userById.get(order.user_id).cash;
+  const fee = Math.min(getSettings().fee_cent, Math.max(0, cash));
+  if (fee <= 0) { order.fee_charged = 1; db.prepare('UPDATE orders SET fee_charged = 1 WHERE id = ?').run(order.id); return; }
   db.prepare('UPDATE users SET cash = cash - ? WHERE id = ?').run(fee, order.user_id);
   order.fee_charged = 1;
   db.prepare('UPDATE orders SET fee_charged = 1 WHERE id = ?').run(order.id);
@@ -399,28 +402,118 @@ function cancelOrder(user, orderId) {
 }
 
 // ---------------------------------------------------------------------------
-// 8) MARKET-MAKER — Staffel-Quotes (Ladder) um den letzten Kurs.
-//    Stufe 0 liegt am engsten (mm_size Stück @ ±mm_spread_bp/2), jede weitere
-//    Stufe rückt um mm_step_bp weiter raus UND wird größer (mm_size_step).
-//    => Schüler-Market-Orders fressen sich durch die Staffel: kleine Orders
-//       fillen knapp am Kurs, große Orders schieben den Preis (Kurswechsel!)
-//       — aber niemals ins Leere, die Tiefe dämpft insane Sprünge.
-//    Der MM hat keine Meinung: nach jedem Trade re-zentriert er aufs new Last.
+// 8) MARKET-MAKER V2 — adaptiver Liquidity Provider der Staatskasse.
+//    Keine symmetrische Perfekt-Treppe mehr (unrealistisch & langweilig), sondern:
+//      · Ragged Ladder: Abstände & Größen je Stufe mit Zufalls-Jitter — das Buch
+//        sieht aus wie viele Marktteilnehmer, nicht wie eine Maschine.
+//      · Referenz-Noise: Quotes zentrieren nicht exakt auf den letzten Kurs,
+//        sondern auf einem kleinen Random Walk => organische Buchentwicklung.
+//      · Volatilitäts-Skalierung (wie echte LPs): Spread wächst kontinuierlich
+//        mit der gemessenen Volatilität (sigma), die Quote-Größen schrumpfen —
+//        ruhiger Markt = eng & groß, wilder Markt = breit & klein.
+//      · Inventory-Skew (Avellaneda-light): hoher Treasury-Bestand => Quotes
+//        tiefer (Bestand abstoßen), niedriger Bestand => Quotes höher (sparsam
+//        verkaufen, günstig zurückkaufen). Hält Cash- und Aktienbestand im
+//        Gleichgewicht, statt einseitig leergelaufen zu werden.
+//      · Momentum-Bremse: nach schneller 10-Min-Bewegung verbreitert der MM
+//        beide Seiten => Trends stolpern, es entsteht Mean Reversion statt
+//        endloser Einheitsrichtung.
+//      · Faires Cash-Budget JE Wert + Teil-Quotes: die Bid-Seite bleibt auch
+//        bei vielen Wertpapieren handelbar (früher frass das erste Buch alles).
+//      · Nachplatzierung: ist der Streubesitz aufgebraucht UND der Kurs klar
+//        über dem IPO, platziert die Staatskasse neue Aktien dazu — der
+//        Ask-Seite geht nie die Ware aus (Nachfrage wird beliefert).
+//      · Notkredit: droht der Staatskasse das Cash auszugehen (Dividenden,
+//        Netto-Verkäufe), stützt die Zentralbank sie wieder auf Spiel-Niveau.
+//    Vorgabe bleibt: der MM ist passiv und MEINUNGSLOS — er macht keinen Trend,
+//    sondern bietet Liquidität um den zuletzt GEHANDELTEN Kurs.
 // ---------------------------------------------------------------------------
 function treasury() { return db.prepare("SELECT * FROM users WHERE role='bank' LIMIT 1").get(); }
 
-// Ladder für ein Buch: { bids: [{price,size}], asks: [{price,size}] }
+// NAV eines ETF (aus Korb-Preisen) — direkt in der Engine berechnet, da etf.js
+// die Engine benötigt (kein zirkulärer Import möglich).
+function etfNavApprox(book) {
+  if (book.sec.type !== 'etf' || !book.sec.shares_per_unit) return null;
+  const rows = db.prepare('SELECT eb.qty, s.id sid FROM etf_baskets eb JOIN securities s ON s.id = eb.stock_id WHERE eb.etf_id = ?').all(book.sec.id);
+  if (!rows.length) return null;
+  let v = 0;
+  for (const r of rows) { const b = books.get(r.sid); v += r.qty * (b ? b.last : 0); }
+  return v / book.sec.shares_per_unit;
+}
+
+// Referenzpreis inkl. kleinem Random-Walk-Noise. Bei ETFs (Auto-Modus aktiv)
+// quotiert der MM NAV-orientiert — genau deshalb kleben echte ETFs intraday
+// am NAV: Je weiter der Kurs vom NAV entfernt ist, desto stärker zieht der
+// NAV die Referenz an (max. 60%). Bei kleinem Premium wirkt er kaum.
+function mmRefPrice(book) {
+  const s = getSettings();
+  let ref = book.last;
+  if (s.etf_auto && book.sec.type === 'etf') {
+    const nav = etfNavApprox(book);
+    if (nav > 0) {
+      const dev = Math.abs(book.last / nav - 1);
+      const alpha = Math.min(1, dev / (s.etf_auto_threshold_pct / 100)) * 0.6;
+      ref = ref * (1 - alpha) + nav * alpha;
+    }
+  }
+  const noise = (Math.random() * 2 - 1) * (s.mm_noise_bp / 10000);
+  return Math.max(tick(book.sec), ref * (1 + noise));
+}
+
+// Kursbewegung der letzten 10 Minuten (Momentum-Bremse). Im Bot-Fast-Mode
+// komprimiert sich die Zeit ×100 — das Fenster schrumpft mit, sonst hängt die
+// Bremse forever an Bewegungen, die "in Fast-Zeit" Ewigkeiten her sind.
+function mmRecentMove(book) {
+  const winMs = (10 * 60 * 1000) / (getSettings().bot_fast ? 100 : 1);
+  const rows = db.prepare('SELECT price FROM price_history WHERE security_id=? AND ts>=? ORDER BY ts ASC LIMIT 1')
+    .get(book.sec.id, Date.now() - winMs);
+  if (!rows || !rows.price) return 0;
+  return book.last / rows.price - 1;
+}
+
+// Realisierte Volatilität: Standardabweichung der relativen Kursänderungen der
+// letzten Punkte. Null-Renditen (Preis-Sampler alle 30s) werden gefiltert,
+// sonst würde der 30s-Takt die Volatilität künstlich nullen. So quotieren echte
+// Liquiditäts-Provider: Spread wächst mit sigma, Größe schrumpft mit sigma.
+function mmVolatility(book) {
+  const rows = db.prepare('SELECT price FROM price_history WHERE security_id=? ORDER BY ts DESC LIMIT 40').all(book.sec.id).reverse();
+  const rets = [];
+  for (let i = 1; i < rows.length; i++) {
+    if (!rows[i - 1].price) continue;
+    const r = rows[i].price / rows[i - 1].price - 1;
+    if (r !== 0) rets.push(r); // Sampler-Punkte ohne Kurswechsel ignorieren
+  }
+  if (rets.length < 3) return 0;
+  const m = rets.reduce((a, b) => a + b, 0) / rets.length;
+  return Math.sqrt(rets.reduce((a, r) => a + (r - m) ** 2, 0) / rets.length);
+}
+
+// Ladder für ein Buch: { bids: [{price,size}], asks: [{price,size}] } — ausgefranst.
 function mmLadder(book) {
   const s = getSettings();
+  const t = treasury();
+  const ref = mmRefPrice(book);
+  // Inventory-Skew: Überschuss drückt die Quotes, Mangel hebt sie (max ±skew_bp).
+  const inv = t ? holdingOf(t.id, book.sec.id) : 0;
+  const target = Math.max(50, Math.round(book.sec.total_shares * s.mm_inv_target_pct));
+  const skew = Math.max(-1, Math.min(1, (inv - target) / target)) * (s.mm_inv_skew_bp / 10000);
+  // Volatilitäts-Skalierung (kontinuierlich): ruhig = eng & groß, wild = breit & klein.
+  const volF = Math.max(0.7, Math.min(s.mm_vol_mult_max, s.mm_vol_ref ? mmVolatility(book) / s.mm_vol_ref : 1));
+  // Momentum-Bremse als Extrem-Circuit-Breaker obendrauf.
+  const guard = Math.abs(mmRecentMove(book)) > s.mm_guard_pct / 100 ? s.mm_guard_widen : 1;
+  const sizeScale = 1 / Math.max(1, volF); // in turbulenten Phasen kleinere Quotes (Risiko!)
+  const center = ref * (1 - skew);
   const half = s.mm_spread_bp / 10000 / 2;
   const step = s.mm_step_bp / 10000;
+  const jit = s.mm_jitter_bp / 10000;
   const levels = Math.max(1, Math.floor(s.mm_levels));
   const bids = [], asks = [];
   for (let i = 0; i < levels; i++) {
-    const dist = half + i * step;                       // Abstand vom letzten Kurs
-    const size = Math.floor(s.mm_size + i * s.mm_size_step); // Tiefe wächst mit Abstand
-    bids.push({ price: Math.max(tick(book.sec), roundToTick(book.last * (1 - dist), book.sec, 'down')), size });
-    asks.push({ price: roundToTick(book.last * (1 + dist), book.sec, 'up'), size });
+    const dist = (half + i * step + Math.random() * jit) * volF * guard;
+    const sizeF = 1 + (Math.random() * 2 - 1) * s.mm_size_jitter;
+    const size = Math.max(1, Math.round((s.mm_size + i * s.mm_size_step) * sizeF * sizeScale));
+    bids.push({ price: Math.max(tick(book.sec), roundToTick(center * (1 - dist), book.sec, 'down')), size });
+    asks.push({ price: roundToTick(center * (1 + dist), book.sec, 'up'), size });
   }
   return { bids, asks };
 }
@@ -438,35 +531,104 @@ function mmCancelQuotes(book) {
   }
 }
 
+// Nachplatzierung: Streubesitz aufgebraucht & Kurs klar über IPO => neue Aktien.
+// Nur bei Aktien (ETFs haben die AP-Creation), max. 1x pro 30 Min je Wert —
+// im Fast-Mode entsprechend schneller (Zeitkompression), damit das ANGEBOT auf
+// eine 100×-Nachfragewelle realistisch reagieren und Pumps begrenzen kann.
+const replenishedAt = new Map(); // secId -> ts
+function mmMaybeReplenish(book, t) {
+  const s = getSettings();
+  const sec = book.sec;
+  if (sec.type !== 'stock') return;
+  // Gesamt-Angebot = Depotbestand + offene MM-Verkaufsorders (Escrow). Die
+  // Ask-Reserve hält sonst immer mm_replenish_min Stück im Depot — ohne die
+  // Escrow-Zählung würde die Nachplatzierung nie auslösen, obwohl der Float
+  // längst von Spielern aufgesaugt wurde.
+  const escrowed = db.prepare("SELECT SUM(amount - filled) q FROM orders WHERE security_id=? AND user_id=? AND is_mm=1 AND side='sell' AND status='open'").get(sec.id, t.id).q || 0;
+  if (holdingOf(t.id, sec.id) + escrowed > s.mm_replenish_min) return;
+  if (book.last < sec.ipo_price * s.mm_replenish_price_mult) return; // schwacher Kurs wird NICHT verwässert
+  const cooldownMs = (30 * 60 * 1000) / (s.bot_fast ? 100 : 1);
+  const last = replenishedAt.get(sec.id) || 0;
+  if (Date.now() - last < cooldownMs) return;
+  replenishedAt.set(sec.id, Date.now());
+  const qty = Math.max(1, Math.floor(s.mm_replenish_qty));
+  db.prepare('UPDATE securities SET total_shares = total_shares + ? WHERE id = ?').run(qty, sec.id);
+  sec.total_shares += qty;
+  addHolding(t.id, sec.id, qty);
+  const n = addNews('ipo', `📦 Nachplatzierung: ${sec.name} (${sec.ticker}) platziert ${qty} neue Aktien`,
+    `Die Nachfrage war so groß, dass der Streubesitz der Staatskasse aufgebraucht ist. Die Investment AG platziert ${qty} zusätzliche Aktien am Markt — frisches Angebot für alle, die mitsteigen wollen.`, sec.id);
+  bus.emit({ type: 'news', news: n });
+}
+
 function mmRecenter(book) {
   if (!book.sec.mm_enabled) return;
   const t0 = treasury();
   if (!t0) return;
-  mmCancelQuotes(book); // alte Leiter abbauen (Escrow fließt zurück)
+  mmCancelQuotes(book);          // alte Leiter abbauen (Escrow fließt zurück)
+  mmMaybeReplenish(book, t0);    // ggf. frische Aktien nachlegen, BEVOR neu quotiert wird
+  const t = treasury();          // frischer Stand (Cancel-Refunds + Nachplatzierung)
+  if (!t) return;
   const { bids, asks } = mmLadder(book);
+  const s = getSettings();
 
-  // Bid-Seite: max. 60% der Cash in Escrow binden — der Rest bleibt als
-  // Liquiditäts-Puffer für AP-Operationen (ETF-Arbitrage, Dividenden).
-  const cashBudget = Math.floor(treasury().cash * 0.6);
+  // Bid-Seite: Cash-Budget FAIR auf alle betreuten Werte verteilen (früher
+  // konnte das erste Buch fast die gesamte Cash binden => einseitige Bücher).
+  const nActive = [...books.values()].filter((b) => b.sec.mm_enabled).length || 1;
+  const cashBudget = Math.floor(t.cash * s.mm_cash_budget_pct / nActive);
   let bidEscrow = 0;
   for (const lvl of bids) {
-    if (bidEscrow + lvl.price * lvl.size > cashBudget) break; // höhere Stufen sind teurer
+    let size = lvl.size;
+    if (bidEscrow + lvl.price * size > cashBudget) {
+      size = Math.floor((cashBudget - bidEscrow) / lvl.price); // Teil-Quote statt Lücke
+      if (size < 5) break;
+    }
     try {
-      placeOrder(treasury(), { security_id: book.sec.id, side: 'buy', type: 'limit', price: lvl.price, amount: lvl.size }, { mm: true });
-      bidEscrow += lvl.price * lvl.size;
+      placeOrder(t, { security_id: book.sec.id, side: 'buy', type: 'limit', price: lvl.price, amount: size }, { mm: true });
+      bidEscrow += lvl.price * size;
     } catch (e) { break; }
   }
-  // Ask-Seite: Stufe für Stufe, solange Treasury-Bestand reicht.
+  // Ask-Seite: Bestand komplett ausreizen — auch Teil-Quotes (früher wurde eine
+  // ganze Stufe übersprungen, nur weil der Restbestand kleiner als die Stufe war).
+  // Reserve: über der Nachplatzierungs-Schwelle bleibt Puffer zurück, damit der
+  // MM nach Sweep-Orders sofort neu quoten kann; darunter wird bis auf 5 Stück
+  // alles angeboten (beidseitige Liquidität geht vor).
+  let inv = holdingOf(t.id, book.sec.id);
+  const reserve = Math.max(5, Math.floor(s.mm_replenish_min));
+  let left = inv > reserve ? inv - reserve : Math.max(0, inv - 5);
   for (const lvl of asks) {
-    const t = treasury();
-    if (holdingOf(t.id, book.sec.id) < lvl.size) continue;
-    try { placeOrder(t, { security_id: book.sec.id, side: 'sell', type: 'limit', price: lvl.price, amount: lvl.size }, { mm: true }); }
+    if (left < 5) break;
+    const size = Math.min(lvl.size, left);
+    try { placeOrder(q.userById.get(t.id), { security_id: book.sec.id, side: 'sell', type: 'limit', price: lvl.price, amount: size }, { mm: true }); }
     catch (e) { break; }
+    left -= size;
   }
+  // Gestaffelter Refresh: jedes Buch bekommt seinen eigenen Takt (±30%).
+  book.mmNextAt = Date.now() + s.mm_refresh_sec * 1000 * (0.7 + Math.random() * 0.6);
   broadcastChanges(book, [], null);
 }
+
+// Refresh-Loop (jobs ruft alle 3s): nur fällige Bücher + Zentralbank-Notkredit.
+// Cooldown 10 Min / Auffüllung auf 25%: die Staatskasse darf über lange
+// Testspiele nie ohne Bid-Seite dastehen.
+let lastRecapAt = 0;
 function mmRefreshAll() {
-  for (const book of books.values()) mmRecenter(book);
+  const s = getSettings();
+  const t = treasury();
+  if (t && t.cash < Math.floor(s.treasury_capital * s.mm_recap_min_pct) && Date.now() - lastRecapAt > 10 * 60 * 1000) {
+    const topUp = Math.floor(s.treasury_capital * 0.25) - t.cash;
+    if (topUp > 0) {
+      lastRecapAt = Date.now();
+      db.prepare('UPDATE users SET cash = cash + ? WHERE id = ?').run(topUp, t.id);
+      const n = addNews('system', '🏦 Notkredit: Zentralbank stützt die Staatskasse',
+        `Die Staatskasse war durch Ausschüttungen und Netto-Käufe fast leer gelaufen und hätte keine Kauforders mehr legen können. Die Zentralbank hat sie mit ${(topUp / 100).toFixed(0)} Credits gestützt — der Market Maker bleibt handlungsfähig.`);
+      bus.emit({ type: 'news', news: n });
+    }
+  }
+  for (const book of books.values()) {
+    if (!book.sec.mm_enabled) continue;
+    if (book.mmNextAt === undefined) book.mmNextAt = 0;
+    if (book.mmNextAt <= Date.now()) mmRecenter(book);
+  }
 }
 
 // ---------------------------------------------------------------------------

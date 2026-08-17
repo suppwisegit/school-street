@@ -13,6 +13,16 @@ export default function MarketTab() {
   const [err, setErr] = useState('');
   const [q, setQ] = useState('');
 
+  // Wertpapiere SOFORT per HTTP laden (WS tickerAll kommt erst alle 5s — ohne
+  // den Initial-Fetch stehen die Skeletons bis zu 5s+ leer herum).
+  useEffect(() => {
+    let alive = true;
+    api('/api/securities')
+      .then((r) => { if (alive && Array.isArray(r.securities)) setSecs(r.securities); })
+      .catch((e) => { if (alive) setErr(e.message); });
+    return () => { alive = false; };
+  }, []);
+
   // Eigenes Vermögen + Cash kompakt über der Liste (ver = Reload nach Trades)
   useEffect(() => {
     let alive = true;

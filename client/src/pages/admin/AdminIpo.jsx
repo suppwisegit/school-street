@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { fmtC } from '../../api.js';
 import { Card, Empty, ErrorBox, Field, Loading, useToast } from '../../ui.jsx';
 
-const DEFAULTS = { ipo_price: '20', founder_shares: '1000', float_shares: '400', threshold_mult: '1.5' };
+const DEFAULTS = { ipo_price: '20', founder_shares: '1000', float_shares: '2000', threshold_mult: '1.5' };
 
 export default function AdminIpo({ A, toast }) {
   const [apps, setApps] = useState(null);

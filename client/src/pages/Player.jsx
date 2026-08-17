@@ -1,7 +1,7 @@
 // Spieler-App-Shell: Login-Gate, Header, Tab-Leiste, Live-Refresh via WS 'dirty'.
 import React, { useCallback, useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
-import { IconBriefcase, IconChartCandle, IconLogout, IconNews, IconTrendingUp, IconUser } from '@tabler/icons-react';
+import { IconBriefcase, IconChartCandle, IconDeviceDesktopAnalytics, IconLogout, IconNews, IconTrendingUp, IconUser } from '@tabler/icons-react';
 import { api, getToken, setToken } from '../api.js';
 import { useWS } from '../ws.jsx';
 import { Loading } from '../ui.jsx';
@@ -66,6 +66,7 @@ export default function PlayerApp() {
           </div>
         </div>
         <div className="row" style={{ gap: 8 }}>
+          <a className="btn sm ghost" href="/desk" title="Trading Desk (Markt-Übersicht)"><IconDeviceDesktopAnalytics size={15} stroke={1.9} /> Desk</a>
           <span className="chip">{user.username}</span>
           <button className="btn sm ghost" onClick={logout} title="Logout" aria-label="Logout"><IconLogout size={15} stroke={1.9} /></button>
         </div>
