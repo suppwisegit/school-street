@@ -50,7 +50,7 @@ for (const [fname, name, ticker, desc, ipo, drift] of founders) {
   db.prepare('UPDATE users SET cash = cash - ? WHERE id=?').run(C(ipo) * FLOAT, treasury.id);
   engine.mmRecenter(engine.books.get(sec.id));
   stocks.push({ sec, drift, founder: u });
-  const n = addNews('ipo', `🔔 IPO: ${name} (${ticker}) notiert zum Kurs ${ipo.toFixed(2)}`,
+  const n = addNews('ipo', `IPO: ${name} (${ticker}) notiert zum Kurs ${ipo.toFixed(2)}`,
     `${fname} geht mit ${name} an die Börse. 1.000 Gründeraktien, ${FLOAT} Stück Streubesitz. Konzept: ${desc}`, sec.id);
 }
 
@@ -111,15 +111,15 @@ const eis = q.secByTicker.get('EIS');
   let total = 0;
   for (const h of holders) { const pay = h.amount * C(0.5); db.prepare('UPDATE users SET cash=cash+? WHERE id=?').run(pay, h.user_id); total += pay; }
   db.prepare('UPDATE users SET cash=cash-? WHERE id=?').run(total, treasury.id);
-  addNews('dividend', `☀️ Hitzefrei! EIS schüttet 0,50 Sonderdividende je Aktie`,
+  addNews('dividend', `Hitzefrei! EIS schüttet 0,50 Sonderdividende je Aktie`,
     `Der Sommer ist da: "Eis am Stiela" zahlt allen Aktionären 0,50 Credits je Aktie aus. Wer sehen will, wie News den Kurs bewegen, sollte jetzt zuschauen.`, eis.id);
 })();
 
-addNews('news', '📣 Willkommen an der School-Street!',
+addNews('news', 'Willkommen an der School-Street!',
   'Die Börse ist eröffnet: 4 Unternehmen, 1 ETF, echtes Orderbuch. Tipp: Lies die News — gute Geschichten bewegen Kurse.');
-addNews('bafin', '⚖️ BaFin-Hinweis', 'Die Börsenaufsicht beobachtet ungewöhnliche Kursbewegungen. Pump & Dump führt zum Konto-Einfrieren.');
-addNews('news', '📈 Q11 Mathe-Desaster', 'Der schlechte Mathe-Schnitt der Q11 lässt die HAUSA-Aktie begehrt erscheinen — Nachhilfe gefragt!', hausa.id);
-addNews('news', '🎉 Event & Party AG plant Sommerfestival', 'EVENT arbeitet an einem Festival auf dem Schulhof. Anleger spekulieren auf Rekordumsätze.', event.id);
+addNews('bafin', 'BaFin-Hinweis', 'Die Börsenaufsicht beobachtet ungewöhnliche Kursbewegungen. Pump & Dump führt zum Konto-Einfrieren.');
+addNews('news', 'Q11 Mathe-Desaster', 'Der schlechte Mathe-Schnitt der Q11 lässt die HAUSA-Aktie begehrt erscheinen — Nachhilfe gefragt!', hausa.id);
+addNews('news', 'Event & Party AG plant Sommerfestival', 'EVENT arbeitet an einem Festival auf dem Schulhof. Anleger spekulieren auf Rekordumsätze.', event.id);
 
 // Handelsverläufe zeitlich über die letzten 6h verteilen (schönere Charts/Board)
 {

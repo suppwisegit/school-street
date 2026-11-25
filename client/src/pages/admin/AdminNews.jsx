@@ -1,108 +1,115 @@
-// Admin: News veröffentlichen.
-import React, { useEffect, useState } from 'react';
-import { IconAlertTriangle, IconBell, IconBuildingBank, IconBuildingFactory2, IconCoin, IconNews, IconScale, IconSend } from '@tabler/icons-react';
+// Admin, Bereich „News": Formular (Titel, Text, Wert optional) und die letzten 30.
+// Stand: GET /api/news?limit=30 + GET /api/securities alle 10 s (nur sichtbar) und nach dem Veröffentlichen.
+import React, { useState } from 'react';
+import { useOutletContext } from 'react-router-dom';
 import { dateTimeStr } from '../../api.js';
-import { Card, Empty, ErrorBox, Field, Loading, useToast } from '../../ui.jsx';
+import { IconNews } from '@tabler/icons-react';
+import {
+  Button, Chip, Empty, ErrorBox, Field, Input, Row, Section, Select, SkelRows, Textarea, useToast,
+} from '../../ui.jsx';
+import { usePoll } from '../../hooks.jsx';
 
-const KINDS = [
-  { value: 'news', label: 'News' },
-  { value: 'bafin', label: 'BaFin' },
-  { value: 'dividend', label: 'Dividende' }
-];
-const KIND_ICONS = {
-  news: { Icon: IconNews, cls: 'news' },
-  dividend: { Icon: IconCoin, cls: 'dividend' },
-  bafin: { Icon: IconScale, cls: 'bafin' },
-  ipo: { Icon: IconBell, cls: 'ipo' },
-  system: { Icon: IconBuildingBank, cls: 'system' },
-  takeover: { Icon: IconAlertTriangle, cls: 'takeover' },
-  etf: { Icon: IconBuildingFactory2, cls: 'etf' }
-};
-
-export default function AdminNews({ A, toast }) {
-  const [secs, setSecs] = useState([]);
+export default function AdminNews() {
+  const { A } = useOutletContext();
+  const toast = useToast();
   const [news, setNews] = useState(null);
+  const [secs, setSecs] = useState([]);
+  const [err, setErr] = useState('');
+  const [ver, setVer] = useState(0);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
-  const [securityId, setSecurityId] = useState('');
-  const [kind, setKind] = useState('news');
-  const [err, setErr] = useState('');
+  const [secId, setSecId] = useState('');
+  const [formErr, setFormErr] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const load = async () => {
-    try {
-      const [s, n] = await Promise.all([api_public_securities(), A('/api/news')]);
-      setSecs(s);
-      setNews(n.news || []);
-    } catch (e) { setErr(e.message); }
-  };
-  const api_public_securities = async () => {
-    const r = await A('/api/securities');
-    return r.securities || [];
-  };
-  useEffect(() => { load(); }, []);
+  const bump = () => setVer((v) => v + 1);
 
-  const publish = async () => {
+  const load = async () => {
+    const [n, s] = await Promise.all([
+      A('/api/news', { params: { limit: 30 } }).catch((e) => ({ error: e.message })),
+      A('/api/securities').catch((e) => ({ error: e.message })),
+    ]);
+    if (n.error || s.error) { setErr(n.error || s.error); return; }
     setErr('');
-    if (title.trim().length < 3) return setErr('Titel zu kurz');
+    setNews(Array.isArray(n.news) ? n.news : []);
+    setSecs(Array.isArray(s.securities) ? s.securities : []);
+  };
+  usePoll(load, 10000, [ver]);
+
+  const publish = async (e) => {
+    e.preventDefault();
+    const t = title.trim();
+    if (t.length < 3) { setFormErr('Der Titel braucht mindestens 3 Zeichen.'); return; }
+    setFormErr('');
     setBusy(true);
     try {
       await A('/api/admin/news', {
         method: 'POST',
-        body: { title: title.trim(), body: body.trim(), kind, security_id: securityId ? Number(securityId) : null }
+        body: { title: t, body: body.trim(), kind: 'news', security_id: secId ? Number(secId) : null },
       });
-      toast('News veröffentlicht', 'ok');
-      setTitle(''); setBody(''); setSecurityId('');
-      load();
-    } catch (e) {
-      setErr(e.message);
-    } finally { setBusy(false); }
+      toast(`Veröffentlicht: ${t}`, 'ok');
+      setTitle('');
+      setBody('');
+      setSecId('');
+      bump();
+    } catch (er) {
+      setFormErr(er.message);
+    } finally {
+      setBusy(false);
+    }
   };
 
-  if (err && !news) return <ErrorBox>{err}</ErrorBox>;
+  const tickerOf = (id) => (secs.find((s) => s.id === id) || {}).ticker || 'Wert';
+  const errBox = <ErrorBox onRetry={bump}>{`Das ging nicht. ${err}`}</ErrorBox>;
 
   return (
-    <div className="panelgrid">
-      <Card title="News veröffentlichen">
-        <ErrorBox>{err}</ErrorBox>
-        <Field label="Kategorie">
-          <select className="select" value={kind} onChange={(e) => setKind(e.target.value)}>
-            {KINDS.map((k) => <option key={k.value} value={k.value}>{k.label}</option>)}
-          </select>
-        </Field>
-        <Field label="Titel">
-          <input className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="z.B. Mensa-Preise steigen dramatisch!" />
-        </Field>
-        <Field label="Text">
-          <textarea className="input" rows={4} value={body} onChange={(e) => setBody(e.target.value)} placeholder="Details, Gerüchte, Zahlen …" />
-        </Field>
-        <Field label="Bezug zu Wertpapier (optional)">
-          <select className="select" value={securityId} onChange={(e) => setSecurityId(e.target.value)}>
-            <option value="">– kein Bezug –</option>
-            {secs.map((s) => <option key={s.id} value={s.id}>{s.ticker} · {s.name}</option>)}
-          </select>
-        </Field>
-        <button className="btn primary block" disabled={busy} onClick={publish}>
-          <IconSend size={15} stroke={1.9} /> {busy ? 'Wird veröffentlicht …' : 'Veröffentlichen'}
-        </button>
-      </Card>
+    <div className="admin-areas">
+      <Section title="News schreiben">
+        <form className="admin-form" onSubmit={publish}>
+          <ErrorBox>{formErr}</ErrorBox>
+          <Field label="Titel" htmlFor="news-title">
+            <Input
+              id="news-title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              maxLength={120}
+              placeholder="Worum geht es?"
+            />
+          </Field>
+          <Field label="Text" htmlFor="news-body">
+            <Textarea
+              id="news-body"
+              rows={4}
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              maxLength={2000}
+              placeholder="Was ist passiert?"
+            />
+          </Field>
+          <Field label="Wert (optional)" help="Gehört die News zu einem bestimmten Wert? Wähl ihn hier aus." htmlFor="news-sec">
+            <Select id="news-sec" value={secId} onChange={(e) => setSecId(e.target.value)}>
+              <option value="">Kein bestimmter Wert</option>
+              {secs.map((s) => <option key={s.id} value={s.id}>{s.ticker} · {s.name}</option>)}
+            </Select>
+          </Field>
+          <Button type="submit" loading={busy} disabled={!title.trim()}>Veröffentlichen</Button>
+        </form>
+      </Section>
 
-      <Card title="Letzte News">
-        {!news ? <Loading /> : news.length === 0 ? <Empty>Noch keine News.</Empty> : (
-          news.slice(0, 15).map((n) => {
-            const K = KIND_ICONS[n.kind] || KIND_ICONS.news;
-            return (
-              <div key={n.id} className="row" style={{ gap: 10, padding: '9px 0', borderBottom: '1px solid var(--border)' }}>
-                <span className={`icochip ${K.cls}`}><K.Icon stroke={1.8} /></span>
-                <div className="grow">
-                  <b>{n.title}</b>
-                  <div className="muted small">{dateTimeStr(n.created_at)}</div>
-                </div>
-              </div>
-            );
-          })
+      <Section title="Letzte News">
+        {!news ? (err ? errBox : <SkelRows n={6} />) : news.length === 0 ? (
+          <Empty icon={IconNews} title="Noch keine News">Schreib oben die erste.</Empty>
+        ) : (
+          news.map((n) => (
+            <Row
+              key={n.id}
+              title={n.title}
+              sub={[dateTimeStr(n.created_at), n.body].filter(Boolean).join(' · ')}
+              trailing={n.security_id ? <Chip>{tickerOf(n.security_id)}</Chip> : undefined}
+            />
+          ))
         )}
-      </Card>
+      </Section>
     </div>
   );
 }

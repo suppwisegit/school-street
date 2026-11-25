@@ -1,161 +1,89 @@
-// Board /board: TV-Ansicht für Aula/Beamer – ohne Login, ohne Scrollen, riesige Typo.
-import React, { useEffect, useMemo, useState } from 'react';
-import { IconTrendingDown, IconTrendingUp } from '@tabler/icons-react';
-import { api, fmtC } from '../api.js';
-import { useWS } from '../ws.jsx';
-import { LineChart, Sparkline } from '../charts.jsx';
-import { Loading, Pct } from '../ui.jsx';
+// Beamer: der Index als große Zahl, links die Kurse, rechts die Top 10.
+// Die Kurse kommen live über den WebSocket (Gast-Verbindung); nur die Rangliste
+// (alle 30 s) und die Uhr (minütlich) werden erneut geholt.
+import React, { memo, useCallback, useEffect, useState } from 'react';
+import { Avatar, Money, Pct } from '../ui.jsx';
+import { usePoll, useTicker, useTickerRow } from '../hooks.jsx';
+import { api } from '../api.js';
+import './Board.css';
 
-const MEDAL_COLORS = ['var(--gold)', '#c7d2e4', '#d29a6a'];
+const BOARD_MS = 30000;
+const fmt = (v) => (typeof v === 'number' && Number.isFinite(v) ? v.toLocaleString('de-DE', { maximumFractionDigits: 2 }) : '–');
 
-export default function BoardPage() {
-  const [data, setData] = useState(null);
-  const [err, setErr] = useState('');
-  const [now, setNow] = useState(Date.now());
+// Eine Kurszeile. Rendert nur neu, wenn sich genau dieser Kurs ändert.
+const Quote = memo(function Quote({ id }) {
+  const t = useTickerRow(id);
+  if (!t) return null;
+  return (
+    <tr>
+      <td className="bd-tk">{t.ticker}</td>
+      <td className="num r">{fmt(t.last / 100)}</td>
+      <td className="num r"><Pct v={t.chg} signed colored /></td>
+    </tr>
+  );
+});
 
-  // Uhr
-  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
+export default function Board() {
+  const { ready, ids } = useTicker();
+  const [board, setBoard] = useState(null);
+  const [clock, setClock] = useState(() => new Date());
 
-  // Poll alle 10s
+  // Beamer-Fassung einschalten (größere Schrift über die Tokens)
   useEffect(() => {
-    let alive = true;
-    const load = () => api('/api/board')
-      .then((r) => { if (alive) { setData(r); setErr(''); } })
-      .catch((e) => { if (alive) setErr(e.message); });
-    load();
-    const t = setInterval(load, 10000);
-    return () => { alive = false; clearInterval(t); };
+    document.documentElement.dataset.view = 'board';
+    return () => { delete document.documentElement.dataset.view; };
   }, []);
 
-  // Live via WS: neue News + Kursticker
-  useWS((m) => {
-    if (m.type === 'news' && m.news) {
-      setData((d) => (d ? { ...d, news: [m.news, ...(d.news || [])].filter((n, i, arr) => arr.findIndex((x) => x.id === n.id) === i).slice(0, 12) } : d));
-    } else if (m.type === 'tickerAll' && Array.isArray(m.ticker)) {
-      setData((d) => {
-        if (!d) return d;
-        const prevSpark = new Map([...(d.tops || []), ...(d.flops || [])].map((t) => [t.id, t.spark]));
-        const withChg = m.ticker.filter((t) => t.type === 'stock' || t.type === 'etf');
-        const sorted = [...withChg].sort((a, b) => b.chg - a.chg);
-        const keepSpark = (t) => ({ ...t, spark: t.spark || prevSpark.get(t.id) });
-        const etfs = (d.etf || []).map((e) => {
-          const t = m.ticker.find((x) => x.id === e.id);
-          if (!t) return e;
-          const nav = e.nav?.nav_per_share;
-          const premium = e.nav && nav ? (t.last / nav - 1) * 100 : (e.nav?.premium_pct ?? 0);
-          return { ...e, last: t.last, chg: t.chg, nav: e.nav ? { ...e.nav, last: t.last, premium_pct: premium } : e.nav };
-        });
-        return { ...d, tops: sorted.slice(0, 4).map(keepSpark), flops: [...sorted].reverse().filter((f) => f.chg < 0).slice(0, 4).map(keepSpark), etf: etfs };
-      });
+  const load = useCallback(async () => {
+    try {
+      if (!document.hidden) setBoard(await api('/api/board'));
+    } catch {
+      /* Index und Rangliste fehlen dann — die Kurse kommen weiter live über WS */
     }
-  });
+  }, []);
+  usePoll(load, BOARD_MS, [load]);
 
-  const clock = useMemo(() => new Date(now).toLocaleTimeString('de-DE'), [now]);
+  useEffect(() => {
+    const t = setInterval(() => setClock(new Date()), 60000);
+    return () => clearInterval(t);
+  }, []);
 
-  if (!data) {
-    return (
-      <div className="board" style={{ alignItems: 'center', justifyContent: 'center' }}>
-        {err ? <div className="errbox">{err}</div> : <Loading label="School-Street Board lädt …" />}
-      </div>
-    );
-  }
-
-  const idxUp = (data.index_history || []).length > 1
-    ? data.index_history[data.index_history.length - 1].v >= data.index_history[0].v
-    : true;
+  const top = board && Array.isArray(board.leaderboard) ? board.leaderboard : [];
 
   return (
     <div className="board">
-      {/* Kopf */}
-      <header className="board-head">
-        <div>
-          <div className="board-sub">SCHOOL-STREET · SCHULBÖRSE · LIVE</div>
-          <div className="board-title">SCHOOL-STREET <span className="street">INDEX</span></div>
-        </div>
-        <div>
-          <div className={`board-index num ${idxUp ? 'pos' : 'neg'}`}>{(data.index ?? 0).toLocaleString('de-DE')}</div>
-        </div>
-        <div className="board-clock num">{clock}</div>
+      <header className="bd-head">
+        <span className="bd-brand">School Street</span>
+        <span className="bd-index num">{fmt(board ? board.index : null)}</span>
+        <span className="bd-clock num">{clock.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}</span>
       </header>
 
-      {/* Index-Chart */}
-      <div className="board-chart">
-        <LineChart points={data.index_history} />
-      </div>
-
-      {/* Mitte: Tops/Flops + Leaderboard */}
-      <div className="board-mid">
-        <div className="board-col">
-          <div className="board-panel grow">
-            <h3 className="pos row" style={{ gap: 6 }}><IconTrendingUp size={15} stroke={2.2} /> TOPS</h3>
-            <div className="tilegrid">
-              {(data.tops || []).map((t) => (
-                <div className="tile wide" key={'t' + t.id}>
-                  <div className="row between"><span className="tk">{t.ticker}</span><span className="pc num pos">+{Number(t.chg || 0).toFixed(2)}%</span></div>
-                  <div className="px num">{fmtC(t.last)}</div>
-                  {t.spark?.length > 1 && <Sparkline values={t.spark} w={150} h={40} />}
-                </div>
-              ))}
-              {(!data.tops || data.tops.length === 0) && <div className="muted">Noch keine Kurse.</div>}
-            </div>
-          </div>
-          <div className="board-panel">
-            <h3 className="neg row" style={{ gap: 6 }}><IconTrendingDown size={15} stroke={2.2} /> FLOPS</h3>
-            <div className="tilegrid">
-              {(data.flops || []).map((t) => (
-                <div className="tile wide" key={'f' + t.id}>
-                  <div className="row between"><span className="tk">{t.ticker}</span><span className="pc num neg">{Number(t.chg || 0).toFixed(2)}%</span></div>
-                  <div className="px num">{fmtC(t.last)}</div>
-                  {t.spark?.length > 1 && <Sparkline values={t.spark} w={150} h={40} />}
-                </div>
-              ))}
-              {(!data.flops || data.flops.length === 0) && <div className="muted">Heute keine Verlierer.</div>}
-            </div>
-          </div>
-        </div>
-
-        <div className="board-col">
-          <div className="board-panel grow">
-            <h3>Leaderboard · Top 10</h3>
-            {(data.leaderboard || []).map((u, i) => (
-              <div className="lb-row" key={u.username}>
-                <span className="un">
-                  {i < 3
-                    ? <b className="num" style={{ marginRight: 8, color: MEDAL_COLORS[i] }}>{i + 1}.</b>
-                    : <span className="muted num" style={{ marginRight: 8 }}>{i + 1}.</span>}
-                  {u.username}
-                </span>
-                <span className="wr num">{fmtC(u.worth)}</span>
-              </div>
-            ))}
-            {(data.leaderboard || []).length === 0 && <div className="muted">Noch keine Trader.</div>}
-          </div>
-        </div>
-      </div>
-
-      {/* ETF-Kacheln + News-Ticker */}
-      {(data.etf || []).length > 0 && (
-        <div className="board-etfs">
-          {data.etf.map((e) => (
-            <div className="board-etf" key={e.id}>
-              <span className="tk">{e.ticker}</span>
-              <span className="v num">{fmtC(e.last)}</span>
-              <span><span className="lbl">NAV </span><span className="v num">{fmtC(e.nav?.nav_per_share ?? 0)}</span></span>
-              <span><Pct v={e.nav?.premium_pct ?? 0} /></span>
-            </div>
-          ))}
-        </div>
+      {!ready && (
+        <div className="bd-off" role="status">Keine Verbindung zur Börse — es wird erneut versucht.</div>
       )}
-      <footer className="marquee">
-        <div className="marquee-inner">
-          {[0, 1].map((dup) => (
-            <span key={dup} style={{ display: 'inline-block' }}>
-              {(data.news || []).map((n) => <span className="item" key={dup + '-' + n.id}>{n.title}</span>)}
-              {(data.news || []).length === 0 && <span className="item">School-Street – die Börsen-Simulation deiner Schule</span>}
-            </span>
+
+      <div className="bd-cols">
+        <table className="table bd-table">
+          <thead>
+            <tr><th>Wert</th><th className="r">Kurs</th><th className="r">Heute</th></tr>
+          </thead>
+          <tbody>
+            {ids.map((id) => <Quote key={id} id={id} />)}
+          </tbody>
+        </table>
+
+        <section className="bd-top">
+          <h2>Rangliste</h2>
+          {top.map((u, i) => (
+            <div className="bd-lb" key={u.username}>
+              <span className="num bd-place">{i + 1}</span>
+              <Avatar seed={u.username} label={u.username} size={40} />
+              <span className="bd-name">{u.username}</span>
+              <Money c={u.worth} className="num" />
+            </div>
           ))}
-        </div>
-      </footer>
+        </section>
+      </div>
     </div>
   );
 }

@@ -1,0 +1,81 @@
+/* Admin-Panel „Börse verwalten": Kopfzeile mit Leiste oben, Meldefeld, Einstellungszeilen.
+   Nur Variablen aus DESIGN.md — keine eigenen Farben, Schatten oder Verläufe. */
+
+.admin-shell { min-height: 100vh; display: flex; flex-direction: column; }
+
+.admin-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px;
+  min-height: 56px; padding: 8px var(--ss-gutter);
+  border-bottom: 1px solid var(--ss-line);
+}
+.admin-brand {
+  font-family: var(--ss-font-num); font-weight: 800; font-size: var(--ss-fs-md);
+  color: var(--ss-text); text-decoration: none; white-space: nowrap;
+}
+.admin-nav { display: flex; flex-wrap: wrap; gap: 4px; }
+.admin-nav a {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px;
+  border-radius: var(--ss-radius-ctl);
+  color: var(--ss-text-2); font-size: var(--ss-fs-base); font-weight: 600; text-decoration: none;
+  transition: background var(--ss-dur-fast) var(--ss-ease), color var(--ss-dur-fast) var(--ss-ease);
+}
+.admin-nav a:hover { background: var(--ss-surface); color: var(--ss-text); }
+.admin-nav a.on { background: var(--ss-surface-2); color: var(--ss-text); }
+.admin-nav a:focus-visible,
+.admin-brand:focus-visible,
+.admin-back:focus-visible { outline: 2px solid var(--ss-white); outline-offset: 2px; }
+
+.admin-user { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+.admin-main {
+  flex: 1; width: 100%;
+  max-width: calc(var(--ss-max-w) + 2 * var(--ss-gutter));
+  margin: 0 auto; padding: 16px var(--ss-gutter) 48px;
+}
+@media (min-width: 720px) {
+  .admin-main { padding-top: 24px; }
+}
+
+.admin-areas { display: flex; flex-direction: column; gap: 32px; }
+.admin-form { display: flex; flex-direction: column; gap: 16px; max-width: 560px; }
+
+/* Bedienelemente am Zeilenende: Eingabe, Einheit, Schaltfläche */
+.admin-ctl { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.admin-quote { min-width: 15rem; font-size: var(--ss-fs-base); }
+.admin-ctl .admin-money { width: 9rem; text-align: right; }
+
+/* Einstellungszeilen: der Hilfesatz bleibt vollständig (bricht um), das Bedienelement
+   rückt auf schmalen Fenstern in die zweite Zeile. */
+.admin-set > .row-text { flex: 1 1 16rem; }
+.admin-set > .row-sub { white-space: normal; }
+
+.admin-note { margin: 0; color: var(--ss-text-2); font-size: var(--ss-fs-sm); line-height: 1.45; }
+
+.admin-search { width: min(240px, 40vw); }
+
+/* Zahlenpaare im Sheet (Vorschau) */
+.admin-kv { display: flex; flex-direction: column; }
+.admin-kv > div {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+  min-height: 40px; padding: 8px 0;
+  border-bottom: 1px solid var(--ss-line);
+  font-size: var(--ss-fs-base);
+}
+
+/* Meldefeld: eine Spalte */
+.admin-login {
+  flex: 1; width: 100%;
+  max-width: calc(var(--ss-gutter) * 2 + 360px);
+  margin: 0 auto; padding: 24px var(--ss-gutter);
+  display: flex; flex-direction: column; justify-content: center; gap: 24px;
+}
+.admin-login h1 {
+  margin: 0; font-family: var(--ss-font-num); font-weight: 800;
+  font-size: var(--ss-fs-xl); line-height: 1.05;
+}
+.admin-login form { display: flex; flex-direction: column; gap: 16px; }
+.admin-back { color: var(--ss-text-2); font-size: var(--ss-fs-sm); }
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-nav a { transition: none; }
+}

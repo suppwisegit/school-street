@@ -7,7 +7,15 @@ const path = require('path');
 const DATA_DIR = path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const db = new Database(path.join(DATA_DIR, process.env.DB_NAME || 'schoolstreet.db'));
+const dbName = process.env.DB_NAME || 'schoolstreet.db';
+// Schutz für die echte Datenbank: Unter Tests (node --test oder NODE_ENV=test)
+// wird schoolstreet.db nie geöffnet — jede Test-DB braucht einen eigenen Namen.
+const underTest = process.env.NODE_ENV === 'test' || !!process.env.NODE_TEST_CONTEXT || process.execArgv.includes('--test');
+if (underTest && dbName === 'schoolstreet.db') {
+  throw new Error(`[db] Test ohne eigene Datenbank: DB_NAME=<name>.db setzen. ${path.join(DATA_DIR, dbName)} wird nicht geöffnet.`);
+}
+
+const db = new Database(path.join(DATA_DIR, dbName));
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
@@ -134,6 +142,25 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 // Migration: virtuelle Trader (Testspiel-Modus) — normales Konto, nur gekennzeichnet.
 try { db.exec('ALTER TABLE users ADD COLUMN is_bot INTEGER NOT NULL DEFAULT 0'); } catch (e) { /* Spalte existiert schon */ }
 
+// Nachrüst-Indizes (additiv, auch auf bestehender Datenbank): bisher scannen diese
+// Spalten ohne Index ganze Tabellen — holdings je Fill/Dividende, orders je Nutzer
+// und je Takt, users je Treasury-/Ranglisten-Frage, trades/news nach Zeit.
+// Die Spalte is_bot steht erst nach der Migration darüber.
+db.exec(`
+CREATE INDEX IF NOT EXISTS idx_holdings_sec ON holdings(security_id);
+CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_mm ON orders(is_mm, status);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+CREATE INDEX IF NOT EXISTS idx_users_bot ON users(is_bot);
+CREATE INDEX IF NOT EXISTS idx_trades_time ON trades(created_at);
+CREATE INDEX IF NOT EXISTS idx_news_sec ON news(security_id);
+CREATE INDEX IF NOT EXISTS idx_news_time ON news(created_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_exp ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_ipo_user ON ipo_applications(user_id);
+`);
+
 // ---------- Settings (im RAM gecached) ----------
 const DEFAULT_SETTINGS = {
   fee_cent: 2000,               // 20 Credits Geldverbrennung pro ausgeführter Order
@@ -165,7 +192,8 @@ const DEFAULT_SETTINGS = {
   mm_recap_to_pct: 0.12,        // ... füllt die Staatskasse auf 12% auf (max. 1x/Stunde)
   mm_vol_ref: 0.01,             // Referenz-Volatilität: 1% => volF=1 (Spread-Skalierung)
   mm_vol_mult_max: 2.8,         // Maximal-Faktor: wilder Markt => bis zu 2.8x so breite Quotes
-  etf_auto: 0,                  // ETF-Auto-Arbitrage: AP schließt Premium/Discount automatisch
+  trading_paused: 0,            // 1 = Börse macht Pause (Spiel pausiert): Spieler und Bots handeln nicht
+  etf_auto: 1,                  // ETF-Auto-Arbitrage: AP schließt Premium/Discount automatisch
   etf_auto_threshold_pct: 10,   // ... ab ±10% Abweichung Kurs <-> NAV
   etf_auto_units: 2,            // ... Basis-Units je Aktion (skaliert mit Abweichung)
   etf_auto_max_units: 25,       // ... Obergrenze der dynamischen Units
@@ -197,7 +225,7 @@ if (settingsCache.etf_auto_interval_sec === 60) {
 function getSettings() { return { ...settingsCache }; }
 function setSetting(key, value) {
   settingsCache[key] = value;
-  db.prepare('INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)').run(key, JSON.stringify(value));
+  q.setSetting.run(key, JSON.stringify(value));
   return settingsCache;
 }
 
@@ -214,7 +242,8 @@ const q = {
   allSecs: db.prepare('SELECT * FROM securities WHERE status = ? ORDER BY id'),
   newsIns: db.prepare('INSERT INTO news(kind, title, body, security_id, created_at) VALUES(?,?,?,?,?)'),
   newsAll: db.prepare('SELECT * FROM news ORDER BY id DESC LIMIT ?'),
-  phIns: db.prepare('INSERT INTO price_history(security_id, ts, price, amount) VALUES(?,?,?,?)')
+  phIns: db.prepare('INSERT INTO price_history(security_id, ts, price, amount) VALUES(?,?,?,?)'),
+  setSetting: db.prepare('INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)')
 };
 
 function fmt(cent) { return (cent / 100).toFixed(2); }
@@ -223,7 +252,16 @@ function addNews(kind, title, body, securityId = null) {
   const r = q.newsIns.run(kind, title, body || '', securityId, now);
   return { id: r.lastInsertRowid, kind, title, body: body || '', security_id: securityId, created_at: now };
 }
-function getUser() { return q.userById.get(1); } // helper unused placeholder
-function bumpActive(userId) { db.prepare('UPDATE users SET last_active = ? WHERE id = ?').run(Date.now(), userId); }
+
+// last_active: höchstens alle 60 s je Nutzer schreiben (vorher ein Schreibzugriff
+// je Request). `user` ist die frisch gelesene Zeile; ihr Stand wird mitgeführt.
+const ACTIVE_INTERVAL_MS = 60000;
+const touchUser = db.prepare('UPDATE users SET last_active = ? WHERE id = ?');
+function bumpActive(user, now = Date.now()) {
+  if (!(user.last_active > now || now - user.last_active >= ACTIVE_INTERVAL_MS)) return false;
+  touchUser.run(now, user.id);
+  user.last_active = now;
+  return true;
+}
 
 module.exports = { db, getSettings, setSetting, q, fmt, addNews, bumpActive, DEFAULT_SETTINGS };

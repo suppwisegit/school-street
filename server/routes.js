@@ -28,8 +28,8 @@ router.post('/auth/register', (req, res) => {
   res.json({ token, user: pubUser(u) });
 });
 
-router.post('/auth/login', (req, res) => {
-  const u = auth.verifyLogin(req.body?.username, req.body?.password);
+router.post('/auth/login', async (req, res) => {
+  const u = await auth.verifyLoginAsync(req.body?.username, req.body?.password);
   if (!u) return res.status(401).json({ error: 'Falsche Zugangsdaten' });
   if (u.role === 'bank') return res.status(403).json({ error: 'Das Treasury-Konto kann sich nicht einloggen' });
   auth.destroySession(req.token);
@@ -135,7 +135,7 @@ router.get('/portfolio', auth.requireAuth, (req, res) => {
 });
 
 router.get('/leaderboard', (req, res) => {
-  const users = db.prepare("SELECT * FROM users WHERE role='user'").all();
+  const users = db.prepare("SELECT * FROM users WHERE role='user' AND is_bot=0").all();
   const rows = users.map(u => {
     let worth = u.cash;
     for (const h of db.prepare('SELECT * FROM holdings WHERE user_id=?').all(u.id)) {
@@ -179,7 +179,7 @@ router.post('/companies/:id/rename', auth.requireAuth, (req, res) => {
   if (name.length < 3) return res.status(400).json({ error: 'Name zu kurz' });
   db.prepare('UPDATE securities SET name=? WHERE id=?').run(name, sec.id);
   engine.books.get(sec.id).sec.name = name;
-  const n = addNews('takeover', `✏️ ${sec.name} heißt jetzt ${name}`, `${req.user.username} hat als Mehrheitsinhaber die Firma ${sec.name} (${sec.ticker}) in ${name} umbenannt.`, sec.id);
+  const n = addNews('takeover', `${sec.name} heißt jetzt ${name}`, `${req.user.username} hat als Mehrheitsinhaber die Firma ${sec.name} (${sec.ticker}) in ${name} umbenannt.`, sec.id);
   bus.emit({ type: 'news', news: n });
   bus.emit({ type: 'ticker', ticker: engine.tickerRow(sec.id) });
   res.json({ ok: true });
@@ -273,7 +273,7 @@ router.get('/board', (req, res) => {
   const withChg = tick.filter(t => t.type === 'stock' || t.type === 'etf');
   const sorted = [...withChg].sort((a, b) => b.chg - a.chg);
   const withSpark = (t) => ({ ...t, spark: sparkFor(t.id) });
-  const lb = db.prepare("SELECT * FROM users WHERE role='user'").all().map(u => {
+  const lb = db.prepare("SELECT * FROM users WHERE role='user' AND is_bot=0").all().map(u => {
     let worth = u.cash;
     for (const h of db.prepare('SELECT * FROM holdings WHERE user_id=?').all(u.id)) {
       const b = engine.books.get(h.security_id);
@@ -313,7 +313,7 @@ router.get('/desk', (req, res) => {
   const tot = db.prepare('SELECT COUNT(*) n, SUM(amount) vol, SUM(price*amount) turnover FROM trades WHERE created_at>=?').get(day);
   const advancers = securities.filter(s => s.type === 'stock' && s.chg > 0).length;
   const decliners = securities.filter(s => s.type === 'stock' && s.chg < 0).length;
-  const lb = db.prepare("SELECT * FROM users WHERE role='user'").all().map(u => {
+  const lb = db.prepare("SELECT * FROM users WHERE role='user' AND is_bot=0").all().map(u => {
     let worth = u.cash;
     for (const h of db.prepare('SELECT * FROM holdings WHERE user_id=?').all(u.id)) {
       const b = engine.books.get(h.security_id);
@@ -338,7 +338,7 @@ router.get('/desk', (req, res) => {
 function adminOverview() {
   const t = engine.treasury();
   const counts = {
-    users: db.prepare("SELECT COUNT(*) c FROM users WHERE role='user'").get().c,
+    users: db.prepare("SELECT COUNT(*) c FROM users WHERE role='user' AND is_bot=0").get().c,
     bots: db.prepare('SELECT COUNT(*) c FROM users WHERE is_bot=1').get().c,
     bots_running: bots.status().running,
     frozen: db.prepare('SELECT COUNT(*) c FROM users WHERE frozen=1').get().c,
@@ -400,7 +400,7 @@ router.post('/admin/ipo/:id/approve', auth.requireAdmin, (req, res) => {
   }
   db.prepare('UPDATE ipo_applications SET status=?, decided_at=? WHERE id=?').run('approved', Date.now(), app.id);
   engine.mmRecenter(engine.books.get(sec.id));
-  const n = addNews('ipo', `🔔 IPO: ${sec.name} (${sec.ticker}) startet zum Kurs ${(ipo / 100).toFixed(2)}`,
+  const n = addNews('ipo', `IPO: ${sec.name} (${sec.ticker}) startet zum Kurs ${(ipo / 100).toFixed(2)}`,
     `${founder.username} hat mit ${sec.name} den Börsengang geschafft! ${founderShares} Gründeraktien (2 Wochen Lock-up), ${floatShares} Stück Streubesitz. Konzept: ${app.description}`, sec.id);
   bus.emit({ type: 'news', news: n });
   bus.emit({ type: 'ticker', ticker: engine.tickerRow(sec.id) });
@@ -428,7 +428,7 @@ router.post('/admin/requests/:id/decide', auth.requireAdmin, (req, res) => {
     engine.books.get(sec.id).sec.total_shares += newShares;
     engine.books.get(sec.id).sec.threshold_price = Math.round(engine.books.get(sec.id).last * 1.5);
     engine.addHoldingPublic(sec.founder_id, sec.id, newShares);
-    const n = addNews('news', `📈 Kapitalerhöhung: ${sec.name} (${sec.ticker})`,
+    const n = addNews('news', `Kapitalerhöhung: ${sec.name} (${sec.ticker})`,
       `Die Investment AG hat die Kapitalerhöhung genehmigt: +${newShares} neue Aktien (20%) für den Gründer ${q.userById.get(sec.founder_id)?.username}. Neue Kurs-Schwelle: ${(engine.books.get(sec.id).last * 1.5 / 100).toFixed(2)}.`, sec.id);
     bus.emit({ type: 'news', news: n });
     bus.emit({ type: 'dirty', user_id: sec.founder_id, what: ['portfolio'] });
@@ -463,7 +463,7 @@ function payDividend(secId, perShare, reason) {
   db.prepare('INSERT INTO dividends(security_id, per_share, total, created_at) VALUES(?,?,?,?)').run(secId, perShare, total, Date.now());
   const t = engine.treasury();
   db.prepare('UPDATE users SET cash = cash - ? WHERE id=?').run(total, t.id); // Staatskasse zahlt
-  const n = addNews('dividend', `💸 Dividende: ${sec.name} (${sec.ticker}) schüttet ${(perShare / 100).toFixed(2)} je Aktie`,
+  const n = addNews('dividend', `Dividende: ${sec.name} (${sec.ticker}) schüttet ${(perShare / 100).toFixed(2)} je Aktie`,
     `${reason ? reason + '. ' : ''}Insgesamt ${(total / 100).toFixed(2)} Credits an ${holders.length} Aktionäre. Achtung ETF-Anleger: auch der Korb wurde bedient.`, secId);
   bus.emit({ type: 'news', news: n });
   const routed = etf.routeDividend(secId, perShare);
@@ -489,7 +489,7 @@ router.get('/admin/users', auth.requireAdmin, (req, res) => {
   const search = `%${String(req.query.q || '')}%`;
   const botFilter = req.query.bots === '1' ? 'AND is_bot=1' : req.query.bots === '0' ? 'AND is_bot=0' : '';
   const rows = db.prepare(`SELECT id, username, cash, realized_pl, frozen, last_active, role, is_bot FROM users
-    WHERE role='user' ${botFilter} AND (username LIKE ?) ORDER BY cash DESC LIMIT 200`).all(search);
+    WHERE role='user' AND is_bot=0 ${botFilter} AND (username LIKE ?) ORDER BY cash DESC LIMIT 200`).all(search);
   res.json({ users: rows.map(u => ({ ...u, worth: u.cash })) });
 });
 router.post('/admin/users/:id/freeze', auth.requireAdmin, (req, res) => {
@@ -497,8 +497,9 @@ router.post('/admin/users/:id/freeze', auth.requireAdmin, (req, res) => {
   if (!u || u.role !== 'user') return res.status(404).json({ error: 'Nicht gefunden' });
   const freeze = req.body?.freeze !== false;
   db.prepare('UPDATE users SET frozen=? WHERE id=?').run(freeze ? 1 : 0, u.id);
+  if (freeze) engine.cancelUserOrders(u.id); // offene Orders zurück, Escrow erstattet
   if (freeze) {
-    const n = addNews('bafin', `⚖️ BaFin ermittelt gegen ${u.username}`,
+    const n = addNews('bafin', `BaFin ermittelt gegen ${u.username}`,
       `Die Börsenaufsicht hat das Konto von ${u.username} eingefroren und wegen des Verdachts auf Marktmanipulation Ermittlungen aufgenommen.`);
     bus.emit({ type: 'news', news: n });
   }
@@ -553,7 +554,7 @@ router.get('/admin/etf/:id/preview', auth.requireAdmin, (req, res) => {
 router.post('/admin/etf/:id/create-units', auth.requireAdmin, (req, res) => {
   try {
     const r = etf.createUnits(Number(req.params.id), req.body?.units);
-    const n = addNews('etf', `🏦 ETF-Creation: ${q.secById.get(Number(req.params.id)).ticker}`,
+    const n = addNews('etf', `ETF-Creation: ${q.secById.get(Number(req.params.id)).ticker}`,
       `Die Investment AG hat ${r.units} Creation Units (${r.shares_created} ETF-Anteile) geschaffen und verkauft sie am Markt. Das drückt den ETF-Kurs Richtung NAV.`);
     bus.emit({ type: 'news', news: n });
     res.json({ ok: true, ...r });
@@ -562,7 +563,7 @@ router.post('/admin/etf/:id/create-units', auth.requireAdmin, (req, res) => {
 router.post('/admin/etf/:id/redeem-units', auth.requireAdmin, (req, res) => {
   try {
     const r = etf.redeemUnits(Number(req.params.id), req.body?.units);
-    const n = addNews('etf', `🏭 ETF-Redemption: ${q.secById.get(Number(req.params.id)).ticker}`,
+    const n = addNews('etf', `ETF-Redemption: ${q.secById.get(Number(req.params.id)).ticker}`,
       `Die Investment AG hat ${r.units} Creation Units (${r.shares_redeemed} ETF-Anteile) vernichtet und die Korb-Aktien am Markt verkauft. Das zieht den ETF-Kurs Richtung NAV.`);
     bus.emit({ type: 'news', news: n });
     res.json({ ok: true, ...r });
@@ -597,5 +598,62 @@ router.post('/admin/treasury/cancel/:orderId', auth.requireAdmin, (req, res) => 
   try { res.json(engine.cancelOrder(engine.treasury(), Number(req.params.orderId))); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
+// =========================== SPIEL (Börse verwalten) ==========================
+// Zustand der Börse für die Spieler-App und den Bereich „Spiel“.
+function gameState() {
+  const s = getSettings();
+  return {
+    paused: !!s.trading_paused, bots_running: !!s.bot_running,
+    income_cent: s.income_cent, income_sec: s.income_sec, income_next_at: jobs.incomeNextAt(),
+    start_capital: s.start_capital, fee_cent: s.fee_cent,
+  };
+}
+function setPaused(paused) {
+  setSetting('trading_paused', paused ? 1 : 0);
+  bus.emit({ type: 'game', game: { paused } });
+  return { ok: true, paused };
+}
+router.get('/game', (req, res) => res.json(gameState()));
+router.post('/admin/game/pause', auth.requireAdmin, (req, res) => res.json(setPaused(true)));
+router.post('/admin/game/resume', auth.requireAdmin, (req, res) => res.json(setPaused(false)));
+
+// Passwort zurücksetzen: neues Passwort setzen, alte Sitzungen beenden.
+router.post('/admin/users/:id/reset-password', auth.requireAdmin, async (req, res) => {
+  const u = q.userById.get(Number(req.params.id));
+  if (!u || u.role !== 'user') return res.status(404).json({ error: 'Nutzer nicht gefunden' });
+  const password = String((req.body || {}).password ?? '');
+  const problem = auth.passwordProblem(password);
+  if (problem) return res.status(400).json({ error: problem });
+  await auth.setPasswordAsync(u.id, password);
+  res.json({ ok: true });
+});
+
+// Guthaben aufladen: Betrag in Credits.
+router.post('/admin/users/:id/topup', auth.requireAdmin, (req, res) => {
+  const u = q.userById.get(Number(req.params.id));
+  if (!u || u.role !== 'user' || u.is_bot) return res.status(404).json({ error: 'Nutzer nicht gefunden' });
+  const amount = Number((req.body || {}).amount);
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) {
+    return res.status(400).json({ error: 'Betrag zwischen 1 und 1.000.000 Credits' });
+  }
+  db.prepare('UPDATE users SET cash = cash + ? WHERE id = ?').run(Math.round(amount * 100), u.id);
+  bus.emit({ type: 'dirty', user_id: u.id, what: ['portfolio'] });
+  res.json({ ok: true, cash: q.userById.get(u.id).cash });
+});
+
+// Kursverlauf aller Werte in EINER Abfrage (Markt- und Depotliste), 30 s zwischengespeichert.
+let sparksCache = null;
+router.get('/sparks', (req, res) => {
+  const points = Math.min(120, Math.max(2, Number(req.query.points) || 40));
+  if (sparksCache && sparksCache.points === points && Date.now() - sparksCache.at < 30000) return res.json(sparksCache.data);
+  const day = 24 * 3600 * 1000;
+  const step = Math.max(60000, Math.round(day / points));
+  const sparks = {};
+  const stmt = db.prepare('SELECT AVG(price) AS p FROM price_history WHERE security_id = ? AND ts >= ? GROUP BY ts / ? ORDER BY ts ASC');
+  for (const book of engine.books.values()) sparks[book.sec.id] = stmt.all(book.sec.id, Date.now() - day, step).map((r) => Math.round(r.p));
+  sparksCache = { at: Date.now(), points, data: { sparks, ts: Date.now() } };
+  res.json(sparksCache.data);
+});
+
 
 module.exports = router;

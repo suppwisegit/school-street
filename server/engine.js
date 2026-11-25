@@ -42,14 +42,37 @@ function insertIntoBook(book, o) {
   const arr = o.side === 'buy' ? book.bids : book.asks;
   const i = arr.findIndex(x =>
     o.side === 'buy'
-      ? (o.price > x.price || (o.price === x.price && o.created_at <= x.created_at))
-      : (o.price < x.price || (o.price === x.price && o.created_at <= x.created_at)));
+      ? (o.price > x.price || (o.price === x.price && o.created_at < x.created_at))
+      : (o.price < x.price || (o.price === x.price && o.created_at < x.created_at)));
   arr.splice(i === -1 ? arr.length : i, 0, o);
+  book.ver = (book.ver || 0) + 1;
 }
 function removeFromBook(book, orderId) {
   book.bids = book.bids.filter(o => o.id !== orderId);
   book.asks = book.asks.filter(o => o.id !== orderId);
+  book.ver = (book.ver || 0) + 1;
 }
+
+// Vorbereitete Statements für den Heißpfad: einmal kompiliert statt pro Fill.
+const st = {
+  touch: db.prepare('UPDATE users SET last_active = ? WHERE id = ?'),
+  cash: db.prepare('UPDATE users SET cash = cash + ? WHERE id = ?'),
+  feeFlag: db.prepare('UPDATE orders SET fee_charged = 1 WHERE id = ?'),
+  filled: db.prepare('UPDATE orders SET filled = ? WHERE id = ?'),
+  filledDone: db.prepare("UPDATE orders SET status='filled' WHERE id = ?"),
+  canceled: db.prepare("UPDATE orders SET status='canceled' WHERE id = ?"),
+  delHolding: db.prepare('DELETE FROM holdings WHERE user_id=? AND security_id=?'),
+  realized: db.prepare('UPDATE users SET realized_pl = realized_pl + ? WHERE id = ?'),
+  trade: db.prepare('INSERT INTO trades(security_id, price, amount, buyer_id, seller_id, created_at) VALUES(?,?,?,?,?,?)'),
+  order: db.prepare(`INSERT INTO orders(security_id, user_id, side, type, price, amount, filled, status, is_mm, created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`),
+  bank: db.prepare("SELECT * FROM users WHERE role='bank' LIMIT 1")
+};
+
+// Broadcast-Sammler: Während der Market-Maker eine Leiste neu legt, entstehen
+// ~25 Orders. Statt 13 Buch-Events wird EIN Event am Ende gesendet.
+let quiet = 0;
+let quietTrades = [];
 
 // Aggregiertes Orderbuch für die UI: [[preis, restmenge], ...] je Seite.
 function bookSnapshot(secId, depth = 10) {
@@ -94,13 +117,13 @@ function loadEngine() {
 // ---------------------------------------------------------------------------
 // 3) DEPOT & CASH
 // ---------------------------------------------------------------------------
-function touch(userId) { db.prepare('UPDATE users SET last_active = ? WHERE id = ?').run(Date.now(), userId); }
+function touch(userId) { st.touch.run(Date.now(), userId); }
 
 function holdingOf(userId, secId) { const h = q.holding.get(userId, secId); return h ? h.amount : 0; }
 function addHolding(userId, secId, delta, price = null) {
   const h = q.holding.get(userId, secId);
   if (!h || h.amount + delta === 0) {
-    if (h && h.amount + delta === 0) db.prepare('DELETE FROM holdings WHERE user_id=? AND security_id=?').run(userId, secId);
+    if (h && h.amount + delta === 0) st.delHolding.run(userId, secId);
     else if (delta !== 0) q.upsertHolding.run(userId, secId, delta, price || 0);
     return;
   }
@@ -115,10 +138,9 @@ function chargeFee(order) {
   if (order.fee_charged || order.is_mm && getSettings().mm_fee_exempt) return;
   const cash = q.userById.get(order.user_id).cash;
   const fee = Math.min(getSettings().fee_cent, Math.max(0, cash));
-  if (fee <= 0) { order.fee_charged = 1; db.prepare('UPDATE orders SET fee_charged = 1 WHERE id = ?').run(order.id); return; }
-  db.prepare('UPDATE users SET cash = cash - ? WHERE id = ?').run(fee, order.user_id);
   order.fee_charged = 1;
-  db.prepare('UPDATE orders SET fee_charged = 1 WHERE id = ?').run(order.id);
+  st.feeFlag.run(order.id);
+  if (fee > 0) st.cash.run(-fee, order.user_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -237,31 +259,34 @@ function executeFill(taker, maker, price, qty, book) {
   // Käufer: Limit-Käufe haben price*amount treuhänderisch hinterlegt -> Differenz zurück
   if (buyerOrder.type === 'limit') {
     const refund = (buyerOrder.price - price) * qty; // >= 0
-    if (refund > 0) db.prepare('UPDATE users SET cash = cash + ? WHERE id = ?').run(refund, buyer.id);
+    if (refund > 0) st.cash.run(refund, buyer.id);
   } else {
-    db.prepare('UPDATE users SET cash = cash - ? WHERE id = ?').run(price * qty, buyer.id);
+    st.cash.run(-(price * qty), buyer.id);
   }
   addHolding(buyer.id, book.sec.id, qty, price);
 
   // Verkäufer: Aktien liegen bei Limit schon im Escrow, bei Market jetzt abbuchen
-  db.prepare('UPDATE users SET cash = cash + ? WHERE id = ?').run(price * qty, seller.id);
+  st.cash.run(price * qty, seller.id);
+  // Einstandspreis: steht die Position noch, ihr Mittelwert; ist sie durch den
+  // Verkauf leer (Limit-Verkauf: Aktien liegen im Escrow), der an der Order
+  // gemerkte Wert — sonst würde der Gewinn mit 0 gebucht.
   const h = q.holding.get(seller.id, book.sec.id);
-  const avg = h ? h.avg_cost : price;
-  db.prepare('UPDATE users SET realized_pl = realized_pl + ? WHERE id = ?').run((price - avg) * qty, seller.id);
+  const avg = h ? h.avg_cost : (Number.isFinite(sellerOrder.avg_cost) ? sellerOrder.avg_cost : price);
+  st.realized.run((price - avg) * qty, seller.id);
   if (sellerOrder.type === 'market') addHolding(seller.id, book.sec.id, -qty);
 
   // Maker-Order fortschreiben (Taker erledigt sich selbst in matchOrder)
   maker.filled += qty;
-  db.prepare('UPDATE orders SET filled = ? WHERE id = ?').run(maker.filled, maker.id);
+  st.filled.run(maker.filled, maker.id);
   if (maker.filled >= maker.amount) {
     maker.status = 'filled';
-    db.prepare("UPDATE orders SET status='filled' WHERE id = ?").run(maker.id);
+    st.filledDone.run(maker.id);
     removeFromBook(book, maker.id);
   }
 
   book.last = price;
-  db.prepare('INSERT INTO trades(security_id, price, amount, buyer_id, seller_id, created_at) VALUES(?,?,?,?,?,?)')
-    .run(book.sec.id, price, qty, buyer.id, seller.id, Date.now());
+  book.ver = (book.ver || 0) + 1;
+  st.trade.run(book.sec.id, price, qty, buyer.id, seller.id, Date.now());
   q.phIns.run(book.sec.id, Date.now(), price, qty);
   return { security_id: book.sec.id, price, amount: qty, buyer: buyer.username, seller: seller.username, ts: Date.now() };
 }
@@ -292,14 +317,14 @@ function matchOrder(taker, book) {
     trades.push(executeFill(taker, maker, maker.price, qty, book));
     taker.filled += qty;
   }
-  db.prepare('UPDATE orders SET filled = ? WHERE id = ?').run(taker.filled, taker.id);
+  st.filled.run(taker.filled, taker.id);
   if (taker.filled >= taker.amount) {
     taker.status = 'filled';
-    db.prepare("UPDATE orders SET status='filled' WHERE id = ?").run(taker.id);
+    st.filledDone.run(taker.id);
     removeFromBook(book, taker.id);
   } else if (taker.type === 'market') {
     taker.status = 'canceled'; // Rest verfällt (XETRA: Market-Orders liegen nicht im Buch)
-    db.prepare("UPDATE orders SET status='canceled' WHERE id = ?").run(taker.id);
+    st.canceled.run(taker.id);
   }
   return trades;
 }
@@ -325,6 +350,9 @@ function placeOrder(user, { security_id, side, type, price, amount }, opts = {})
     throw new Error(`Lock-up: Du darfst Deine Gründeraktien noch nicht verkaufen (bis ${new Date(sec.lockup_until).toLocaleString('de-DE')})`);
   }
   const s = getSettings();
+  // Pause („Börse verwalten" → Spiel): Spieler und Bots können nicht handeln,
+  // der Market-Maker quotiert weiter, damit die Bücher erhalten bleiben.
+  if (isPlayer && s.trading_paused) throw new Error('Die Börse macht gerade Pause.');
   const feeReserve = (isMM && s.mm_fee_exempt) ? 0 : s.fee_cent;
 
   // --- Validierung VOR Ausführung: Preis-Band & Markt-Order-Schutz ---
@@ -349,37 +377,28 @@ function placeOrder(user, { security_id, side, type, price, amount }, opts = {})
     }
   }
 
+  // Limit-Kauf: Geld für die ganze Menge plus Gebühr muss da sein (wird hinterlegt)
+  if (type === 'limit' && side === 'buy') {
+    const cost = price * amount + feeReserve;
+    if (user.cash < cost) throw new Error(`Nicht genug Credits (benötigt ${fmtCr(cost)} inkl. Gebühr)`);
+  }
+
   const order = {
     security_id: sec.id, user_id: user.id, side, type,
     price: null, amount, filled: 0, status: 'open', is_mm: isMM ? 1 : 0,
     fee_charged: 0, created_at: Date.now()
   };
 
-  if (type === 'limit') {
-    order.price = price;
-    if (side === 'buy') {
-      const cost = price * amount + feeReserve;
-      if (user.cash < cost) throw new Error(`Nicht genug Credits (benötigt ${fmtCr(cost)} inkl. Gebühr)`);
-      db.prepare('UPDATE users SET cash = cash - ? WHERE id = ?').run(price * amount, user.id);
-      user.cash -= price * amount;
-    } else {
-      if (holdingOf(user.id, sec.id) < amount) throw new Error('Nicht genug Aktien im Depot');
-      addHolding(user.id, sec.id, -amount);
-    }
-    const r = db.prepare(`INSERT INTO orders(security_id, user_id, side, type, price, amount, filled, status, is_mm, created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?)`)
-      .run(order.security_id, order.user_id, order.side, 'limit', price, amount, 0, 'open', isMM ? 1 : 0, order.created_at);
-    order.id = r.lastInsertRowid;
-    insertIntoBook(book, order);
-  } else { // market
-    if (side === 'sell' && holdingOf(user.id, sec.id) < amount) throw new Error('Nicht genug Aktien im Depot');
-    const r = db.prepare(`INSERT INTO orders(security_id, user_id, side, type, price, amount, filled, status, is_mm, created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?)`)
-      .run(order.security_id, order.user_id, order.side, 'market', null, amount, 0, 'open', isMM ? 1 : 0, order.created_at);
-    order.id = r.lastInsertRowid;
+  // Escrow, Insert und Matching in EINER Transaktion: ein Fehler dazwischen
+  // hinterlässt keine halbe Buchung (Gebühr, Depot, Trade, Orderstatus).
+  let trades;
+  try {
+    trades = runOrder(order, price, user);
+  } catch (e) {
+    removeFromBook(book, order.id); // Rollback gilt auch fürs Buch im RAM
+    throw e;
   }
-
-  const trades = matchOrder(order, book);
+  if (type === 'limit' && side === 'buy') user.cash -= price * order.amount;
 
   if (trades.length && !isMM) mmRecenter(book); // MM folgt dem Marktpreis – nur passive Liquidität
   if (trades.length) checkTakeover(book.sec);
@@ -387,16 +406,62 @@ function placeOrder(user, { security_id, side, type, price, amount }, opts = {})
   return { order: { ...order }, trades, last: book.last };
 }
 
+const runOrder = db.transaction((order, price, user) => {
+  const book = books.get(order.security_id);
+  const isLimit = order.type === 'limit';
+  if (isLimit) order.price = price;
+  if (isLimit) {
+    if (order.side === 'buy') {
+      st.cash.run(-(order.price * order.amount), user.id);
+    } else {
+      // Limit-Verkauf: Aktien wandern ins Escrow. Den Einstandspreis an der
+      // Order merken, bevor die Position leerläuft (siehe executeFill).
+      const h = q.holding.get(user.id, order.security_id);
+      if (!h || h.amount < order.amount) throw new Error('Nicht genug Aktien im Depot');
+      order.avg_cost = h.avg_cost;
+      addHolding(user.id, order.security_id, -order.amount);
+    }
+  } else if (order.side === 'sell' && holdingOf(user.id, order.security_id) < order.amount) {
+    throw new Error('Nicht genug Aktien im Depot'); // Markt-Verkauf: Prüfung vor jeder Buchung
+  }
+  order.id = st.order.run(order.security_id, order.user_id, order.side, order.type, order.price, order.amount, 0, 'open', order.is_mm, order.created_at).lastInsertRowid;
+  if (isLimit) insertIntoBook(book, order);
+  return matchOrder(order, book);
+});
+
+// Hebt ALLE offenen Orders eines Nutzers auf (Einfrieren, Löschen) — mit
+// Escrow-Rückzahlung und einem Buch-Event je betroffenem Wert.
+function cancelUserOrders(userId) {
+  let n = 0;
+  for (const book of books.values()) {
+    let here = 0;
+    for (const o of [...book.bids, ...book.asks].filter(x => x.user_id === userId)) {
+      const remaining = o.amount - o.filled;
+      if (o.side === 'buy') st.cash.run(o.price * remaining, userId);
+      else addHolding(userId, o.security_id, remaining, Number.isFinite(o.avg_cost) ? o.avg_cost : o.price);
+      removeFromBook(book, o.id);
+      o.status = 'canceled';
+      st.canceled.run(o.id);
+      here++;
+    }
+    if (here) { n += here; broadcastChanges(book, [], null); }
+  }
+  if (n) bus.emit({ type: 'dirty', user_id: userId, what: ['portfolio', 'orders'] });
+  return n;
+}
+
 function cancelOrder(user, orderId) {
   const o = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
   if (!o || o.user_id !== user.id) throw new Error('Order nicht gefunden');
   if (o.status !== 'open') throw new Error('Order ist nicht mehr offen');
   const book = books.get(o.security_id);
+  // Die Order im RAM kennt den Einstandspreis der hinterlegten Aktien.
+  const mem = [...book.bids, ...book.asks].find(x => x.id === o.id);
   removeFromBook(book, o.id);
-  db.prepare("UPDATE orders SET status='canceled' WHERE id = ?").run(o.id);
+  st.canceled.run(o.id);
   const remaining = o.amount - o.filled;
-  if (o.side === 'buy') db.prepare('UPDATE users SET cash = cash + ? WHERE id = ?').run(o.price * remaining, o.user_id);
-  else addHolding(o.user_id, o.security_id, remaining);
+  if (o.side === 'buy') st.cash.run(o.price * remaining, o.user_id);
+  else addHolding(o.user_id, o.security_id, remaining, mem && Number.isFinite(mem.avg_cost) ? mem.avg_cost : o.price);
   broadcastChanges(book, [], o.user_id);
   return { ok: true };
 }
@@ -428,7 +493,18 @@ function cancelOrder(user, orderId) {
 //    Vorgabe bleibt: der MM ist passiv und MEINUNGSLOS — er macht keinen Trend,
 //    sondern bietet Liquidität um den zuletzt GEHANDELTEN Kurs.
 // ---------------------------------------------------------------------------
-function treasury() { return db.prepare("SELECT * FROM users WHERE role='bank' LIMIT 1").get(); }
+// Staatskasse: sehr oft gefragt (jede Stufe einer Leiter). Die ID ändert sich
+// nie — also einmal suchen, danach per Primärschlüssel lesen. Der Kontostand
+// im Ergebnis ist immer frisch, weil die Zeile bei jedem Lesen neu geholt wird.
+let bankId = null;
+function treasury() {
+  if (bankId == null) {
+    const t = st.bank.get();
+    if (!t) return undefined;
+    bankId = t.id;
+  }
+  return q.userById.get(bankId);
+}
 
 // NAV eines ETF (aus Korb-Preisen) — direkt in der Engine berechnet, da etf.js
 // die Engine benötigt (kein zirkulärer Import möglich).
@@ -520,14 +596,14 @@ function mmLadder(book) {
 
 // Hebt MM-Quoten eines Werts auf (Escrow zurück ins Treasury-Depot/-konto)
 function mmCancelQuotes(book) {
-  const mmOrders = db.prepare("SELECT id FROM orders WHERE security_id = ? AND status='open' AND is_mm = 1").all(book.sec.id);
-  for (const { id } of mmOrders) {
-    const o = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+  // Die offenen MM-Orders stehen im RAM — keine Tabellen-Abfrage je Order nötig.
+  for (const o of [...book.bids, ...book.asks].filter(x => x.is_mm && x.status === 'open')) {
     const remaining = o.amount - o.filled;
-    if (o.side === 'buy') db.prepare('UPDATE users SET cash = cash + ? WHERE id = ?').run(o.price * remaining, o.user_id);
-    else addHolding(o.user_id, o.security_id, remaining);
-    removeFromBook(book, id);
-    db.prepare("UPDATE orders SET status='canceled' WHERE id = ?").run(id);
+    if (o.side === 'buy') st.cash.run(o.price * remaining, o.user_id);
+    else addHolding(o.user_id, o.security_id, remaining, Number.isFinite(o.avg_cost) ? o.avg_cost : undefined);
+    removeFromBook(book, o.id);
+    o.status = 'canceled';
+    st.canceled.run(o.id);
   }
 }
 
@@ -555,19 +631,28 @@ function mmMaybeReplenish(book, t) {
   db.prepare('UPDATE securities SET total_shares = total_shares + ? WHERE id = ?').run(qty, sec.id);
   sec.total_shares += qty;
   addHolding(t.id, sec.id, qty);
-  const n = addNews('ipo', `📦 Nachplatzierung: ${sec.name} (${sec.ticker}) platziert ${qty} neue Aktien`,
+  const n = addNews('ipo', `Nachplatzierung: ${sec.name} (${sec.ticker}) platziert ${qty} neue Aktien`,
     `Die Nachfrage war so groß, dass der Streubesitz der Staatskasse aufgebraucht ist. Die Investment AG platziert ${qty} zusätzliche Aktien am Markt — frisches Angebot für alle, die mitsteigen wollen.`, sec.id);
   bus.emit({ type: 'news', news: n });
 }
 
-function mmRecenter(book) {
-  if (!book.sec.mm_enabled) return;
+// Stellt ein Buch nach einem fehlgeschlagenen Recenter aus der DB wieder her
+// (die Transaktion wurde zurückgerollt, der RAM könnte noch Orders führen).
+function rebuildBook(book) {
+  book.bids = [];
+  book.asks = [];
+  for (const o of db.prepare("SELECT * FROM orders WHERE security_id = ? AND status='open' ORDER BY created_at ASC, id ASC").all(book.sec.id)) insertIntoBook(book, o);
+}
+
+// Eine Leiste neu legen = ~25 Orders. Alles läuft in EINER Transaktion und
+// sendet am Ende EIN Buch-Event (früher 13).
+const recenterBody = db.transaction((book) => {
   const t0 = treasury();
-  if (!t0) return;
+  if (!t0) return false;
   mmCancelQuotes(book);          // alte Leiter abbauen (Escrow fließt zurück)
   mmMaybeReplenish(book, t0);    // ggf. frische Aktien nachlegen, BEVOR neu quotiert wird
   const t = treasury();          // frischer Stand (Cancel-Refunds + Nachplatzierung)
-  if (!t) return;
+  if (!t) return false;
   const { bids, asks } = mmLadder(book);
   const s = getSettings();
 
@@ -604,7 +689,26 @@ function mmRecenter(book) {
   }
   // Gestaffelter Refresh: jedes Buch bekommt seinen eigenen Takt (±30%).
   book.mmNextAt = Date.now() + s.mm_refresh_sec * 1000 * (0.7 + Math.random() * 0.6);
-  broadcastChanges(book, [], null);
+  return true;
+});
+
+function mmRecenter(book) {
+  if (!book.sec.mm_enabled) return;
+  quiet++;
+  quietTrades = [];
+  let ok = false;
+  try {
+    ok = recenterBody(book);
+  } catch (e) {
+    console.error('[Market-Maker] Leiste konnte nicht neu gelegt werden:', e.message);
+    rebuildBook(book);
+  }
+  const pending = quietTrades;
+  quietTrades = [];
+  quiet--;
+  if (!ok) return;
+  if (pending.length) checkTakeover(book.sec);
+  broadcastChanges(book, pending, null);
 }
 
 // Refresh-Loop (jobs ruft alle 3s): nur fällige Bücher + Zentralbank-Notkredit.
@@ -619,7 +723,7 @@ function mmRefreshAll() {
     if (topUp > 0) {
       lastRecapAt = Date.now();
       db.prepare('UPDATE users SET cash = cash + ? WHERE id = ?').run(topUp, t.id);
-      const n = addNews('system', '🏦 Notkredit: Zentralbank stützt die Staatskasse',
+      const n = addNews('system', 'Notkredit: Zentralbank stützt die Staatskasse',
         `Die Staatskasse war durch Ausschüttungen und Netto-Käufe fast leer gelaufen und hätte keine Kauforders mehr legen können. Die Zentralbank hat sie mit ${(topUp / 100).toFixed(0)} Credits gestützt — der Market Maker bleibt handlungsfähig.`);
       bus.emit({ type: 'news', news: n });
     }
@@ -642,7 +746,7 @@ function checkTakeover(sec) {
       db.prepare('UPDATE securities SET majority_holder_id = ? WHERE id = ?').run(r.user_id, sec.id);
       sec.majority_holder_id = r.user_id;
       const u = q.userById.get(r.user_id);
-      const n = addNews('takeover', `🚨 FEINDLICHE ÜBERNAHME: ${u.username} übernimmt ${sec.name}!`,
+      const n = addNews('takeover', `FEINDLICHE ÜBERNAHME: ${u.username} übernimmt ${sec.name}!`,
         `${u.username} hält jetzt über 50% der Anteile an ${sec.name} (${sec.ticker}) und erhält Sonderrechte: Firmenumbenennung und Antrag auf Sonderdividende.`, sec.id);
       bus.emit({ type: 'news', news: n });
     }
@@ -650,6 +754,7 @@ function checkTakeover(sec) {
 }
 
 function broadcastChanges(book, trades, touchedUserId) {
+  if (quiet) { if (trades.length) quietTrades.push(...trades); return; } // gesammelt bis zum Ende der Leiste
   if (trades.length) bus.emit({ type: 'ticker', ticker: tickerRow(book.sec.id) });
   bus.emit({ type: 'book', security_id: book.sec.id, book: bookSnapshot(book.sec.id) });
   for (const t of trades) bus.emit({ type: 'trade', ...t });
@@ -657,17 +762,27 @@ function broadcastChanges(book, trades, touchedUserId) {
 }
 
 function tickerRow(secId) { return tickerRowCached(secId, books.get(secId)); }
+// Ticker-Zeile mit Cache: Kurs, Geld/Brief und Volumen ändern sich nur mit dem
+// Buch (book.ver); der 24-h-Bezugswert höchstens alle 5 s. So kostet der Ticker
+// für alle Verbindungen zusammen 2 Abfragen je Wert statt 2 je Wert UND je Aufruf.
 function tickerRowCached(secId, b) {
-  const day = Date.now() - 24 * 3600 * 1000;
+  const now = Date.now();
+  const c = b.rowCache;
+  if (c && c.ver === b.ver && now - c.at < 5000) return { ...c.row };
+  const day = now - 24 * 3600 * 1000;
   const ref = db.prepare('SELECT price FROM price_history WHERE security_id = ? AND ts >= ? ORDER BY ts ASC LIMIT 1').get(secId, day);
   const refPrice = ref ? ref.price : b.sec.ipo_price;
   const bookSnap = bookSnapshot(secId, 1);
   const vol = db.prepare('SELECT SUM(amount) v FROM trades WHERE security_id = ? AND created_at >= ?').get(secId, day).v || 0;
-  return {
-    id: secId, ticker: b.sec.ticker, name: b.sec.name, type: b.sec.type,
-    last: b.last, ref: refPrice, chg: refPrice ? Math.round((b.last / refPrice - 1) * 10000) / 100 : 0,
-    bid: bookSnap.bids[0]?.[0] || null, ask: bookSnap.asks[0]?.[0] || null, vol
+  b.rowCache = {
+    ver: b.ver, at: now,
+    row: {
+      id: secId, ticker: b.sec.ticker, name: b.sec.name, type: b.sec.type,
+      last: b.last, ref: refPrice, chg: refPrice ? Math.round((b.last / refPrice - 1) * 10000) / 100 : 0,
+      bid: bookSnap.bids[0]?.[0] || null, ask: bookSnap.asks[0]?.[0] || null, vol
+    }
   };
+  return { ...b.rowCache.row };
 }
 function tickerAll() { return [...books.keys()].map(id => tickerRowCached(id, books.get(id))); }
 
@@ -717,7 +832,7 @@ function listSecurity({ type, ticker, name, description, founder_id, ipo_price, 
 }
 
 module.exports = {
-  books, loadEngine, placeOrder, cancelOrder, bookSnapshot, tickerAll, tickerRow,
+  books, loadEngine, placeOrder, cancelOrder, cancelUserOrders, bookSnapshot, tickerAll, tickerRow,
   costToBuy, proceedsToSell, walkBook, previewOrder, computeStats, priceBand,
   listSecurity, mmRecenter, mmCancelQuotes, mmRefreshAll, mmLadder, holdingOf,
   treasury, tick, checkTakeover, addHoldingPublic: addHolding, sideDepth

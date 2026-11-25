@@ -1,0 +1,154 @@
+/* Shell und einfache Seiten — nur Variablen aus DESIGN.md. */
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}
+
+.shell-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px var(--ss-gutter);
+}
+
+.shell-brand {
+  font-family: var(--ss-font-num);
+  font-size: var(--ss-fs-md);
+  font-weight: 800;
+  font-stretch: 110%;
+  color: var(--ss-text);
+}
+
+.shell-me {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  border-radius: 999px;
+}
+
+.shell-me:focus-visible {
+  outline: 2px solid var(--ss-white);
+  outline-offset: 2px;
+}
+
+/* Ab 1024 px: Markt-Liste links, Handel rechts */
+.shell-wide {
+  display: grid;
+  grid-template-columns: 380px minmax(0, 1fr);
+  align-items: start;
+}
+
+.shell-wide > aside {
+  border-right: 1px solid var(--ss-line);
+}
+
+/* Login: eine Spalte, ohne Verlauf und Glow */.login {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 24px;
+  width: min(100%, 380px);
+  min-height: 100dvh;
+  margin: 0 auto;
+  padding: 48px var(--ss-gutter);
+}
+
+.login h1 {
+  margin: 0;
+  font-family: var(--ss-font-num);
+  font-size: var(--ss-fs-xl);
+  font-weight: 800;
+  font-stretch: 110%;
+}
+
+.login p {
+  margin: 4px 0 0;
+}
+
+/* Rang: die eigene Zeile bleibt unten sichtbar */
+.rank-hero {
+  padding: 8px 0 24px;
+}
+
+.rank-hero > p {
+  margin: 0;
+}
+
+.rank-sticky {
+  position: sticky;
+  bottom: 0;
+  background: var(--ss-bg);
+  border-top: 1px solid var(--ss-line-strong);
+}
+
+.me-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 0 24px;
+}
+
+.me-head h1 {
+  margin: 0;
+  font-size: var(--ss-fs-lg);
+  font-weight: 700;
+}
+
+/* News: Zeilen ohne Bilder */
+.news-item {
+  padding: 16px var(--ss-gutter);
+  border-bottom: 1px solid var(--ss-line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.news-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--ss-fs-xs);
+  font-weight: 600;
+  color: var(--ss-text-3);
+}
+
+.news-item h2 {
+  margin: 0;
+  font-size: var(--ss-fs-base);
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.news-item p {
+  margin: 0;
+  font-size: var(--ss-fs-sm);
+  line-height: 1.45;
+  color: var(--ss-text-2);
+  white-space: pre-line;
+}
+
+.news-link {
+  color: var(--ss-text);
+  font-weight: 600;
+  text-decoration: none;
+  border-bottom: 1px solid var(--ss-line-strong);
+}
+
+.news-link:focus-visible {
+  outline: 2px solid var(--ss-white);
+  outline-offset: 2px;
+}
+
+
+/* Ab 720 px gehört die Leiste nach oben und klebt beim Scrollen: Sie steht im
+   Markup nach dem Inhalt (mobil unten fixiert), hier also davor sortiert. */
+@media (min-width: 720px) {
+  .shell > .shell-head { order: 1; }
+  .shell > .tape { order: 2; }
+  .shell > .banner { order: 3; }
+  .shell > .tabbar { order: 4; }
+  .shell > .shell-body { order: 5; flex: 1 0 auto; }
+}

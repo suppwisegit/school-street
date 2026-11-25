@@ -1,0 +1,95 @@
+/* Handel — nur Variablen aus DESIGN.md. */
+.btn.trade-back {
+  display: none;
+}
+
+.trade-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0 16px;
+}
+
+.trade-id {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.trade-tk {
+  font-family: var(--ss-font-num);
+  font-size: var(--ss-fs-lg);
+  font-weight: 800;
+}
+
+.trade-quote {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex: none;
+}
+
+.trade-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 24px;
+}
+
+.trade-canvas {
+  position: relative;
+  height: 280px;
+}
+
+.trade-quick {
+  display: flex;
+  gap: 8px;
+}
+
+.trade-quick .btn {
+  flex: 1 1 0;
+}
+
+.trade-form,
+.trade-done {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.trade-form > p,
+.trade-done > p {
+  margin: 0;
+}
+
+.trade-preview {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--ss-line);
+}
+
+.trade-total {
+  font-size: var(--ss-fs-xl);
+  font-weight: 700;
+}
+
+.trade-done-title {
+  font-size: var(--ss-fs-md);
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.trade-pause {
+  margin: 0;
+  padding: 0 0 12px;
+}
+
+@media (max-width: 1023px) {
+  .btn.trade-back {
+    display: inline-flex;
+    margin-top: 8px;
+  }
+}

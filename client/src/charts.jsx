@@ -1,108 +1,26 @@
-// Charts: CandleChart auf Basis von TradingView Lightweight-Charts (MIT),
-// Sparkline + LineChart (Canvas) für Mini-/Board-Anzeigen.
-// Alle Preise sind INTEGER-CENTS.
-import React, { useEffect, useRef } from 'react';
-import { createChart } from 'lightweight-charts';
-import { fmtC } from './api.js';
+// charts.jsx — Sparkline und Linienchart auf Canvas 2D (ohne Bibliothek).
+// Das Kerzenchart liegt in candle.jsx. Preise sind INTEGER-CENTS; Farben kommen
+// aus den Design-Tokens.
+import React, { useEffect, useMemo, useRef } from 'react';
 
-const GREEN = '#0ecb81';
-const RED = '#f6465d';
-const GRID = 'rgba(255, 255, 255, 0.05)';
-const LABEL = '#77777f';
-
-// ---------------- Candle-Chart (Lightweight-Charts) ----------------
-export function CandleChart({ candles }) {
-  const boxRef = useRef(null);
-  const chartRef = useRef(null);
-  const priceRef = useRef(null);
-  const volRef = useRef(null);
-
-  // Chart einmalig erzeugen
-  useEffect(() => {
-    const el = boxRef.current;
-    if (!el) return;
-    const chart = createChart(el, {
-      autoSize: true,
-      layout: {
-        background: { color: 'transparent' },
-        textColor: LABEL,
-        fontFamily: "'Archivo Variable', 'Instrument Sans', sans-serif",
-        fontSize: 11,
-      },
-      grid: { vertLines: { color: GRID }, horzLines: { color: GRID } },
-      rightPriceScale: { borderColor: '#232329' },
-      timeScale: { borderColor: '#232329', timeVisible: true, secondsVisible: false, rightOffset: 2 },
-      crosshair: {
-        vertLine: { color: 'rgba(91, 157, 255, 0.5)', width: 1, style: 3, labelBackgroundColor: '#1b1b21' },
-        horzLine: { color: 'rgba(91, 157, 255, 0.5)', width: 1, style: 3, labelBackgroundColor: '#1b1b21' },
-      },
-      localization: {
-        locale: 'de-DE',
-        priceFormatter: (p) => p.toFixed(2),
-      },
-      handleScale: { axisPressedMouseMove: { time: true, price: false } },
-    });
-    const price = chart.addCandlestickSeries({
-      upColor: GREEN,
-      downColor: RED,
-      borderVisible: false,
-      wickUpColor: GREEN,
-      wickDownColor: RED,
-      priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
-    });
-    const vol = chart.addHistogramSeries({
-      priceScaleId: '',
-      priceFormat: { type: 'volume' },
-      lastValueVisible: false,
-      priceLineVisible: false,
-    });
-    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.84, bottom: 0 } });
-    chartRef.current = chart;
-    priceRef.current = price;
-    volRef.current = vol;
-    return () => { chart.remove(); chartRef.current = null; };
-  }, []);
-
-  // Daten-Updates
-  useEffect(() => {
-    const price = priceRef.current;
-    const vol = volRef.current;
-    if (!price || !vol) return;
-    const data = (candles || []).slice().sort((a, b) => a.t - b.t);
-    if (!data.length) {
-      price.setData([]);
-      vol.setData([]);
-      return;
-    }
-    price.setData(data.map((c) => ({
-      time: Math.floor(c.t / 1000),
-      open: c.o / 100,
-      high: c.h / 100,
-      low: c.l / 100,
-      close: c.c / 100,
-    })));
-    vol.setData(data.map((c) => ({
-      time: Math.floor(c.t / 1000),
-      value: c.v || 0,
-      color: c.c >= c.o ? 'rgba(14, 203, 129, 0.3)' : 'rgba(246, 70, 93, 0.3)',
-    })));
-    chartRef.current?.timeScale().fitContent();
-  }, [candles]);
-
-  return (
-    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-      <div ref={boxRef} style={{ position: 'absolute', inset: 0 }} />
-      {!(candles && candles.length) && (
-        <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', color: LABEL, fontSize: 13, fontWeight: 600 }}>
-          Noch keine Kursdaten – warten auf die ersten Trades
-        </div>
-      )}
-    </div>
-  );
+let palette = null;
+function pal() {
+  if (palette) return palette;
+  const css = getComputedStyle(document.documentElement);
+  const v = (name, fb) => (css.getPropertyValue(name) || '').trim() || fb;
+  palette = { up: v('--ss-up', '#3ee08a'), down: v('--ss-down', '#ff6b7a'), text: v('--ss-text-3', '#8f999e'), font: v('--ss-font-body', 'system-ui') };
+  return palette;
+}
+function rgba(hex, a) {
+  const h = hex.replace('#', '');
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  const n = parseInt(full, 16);
+  if (!Number.isFinite(n)) return `rgba(128,128,128,${a})`;
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
 
-// Zeichnet bei Größenänderung neu; stellt devicePixelRatio-Schärfung bereit.
-function useCanvasDraw(draw) {
+// Zeichnet bei Größenänderung neu; `deps` sagt, wann sich die Daten ändern.
+function useCanvasDraw(draw, deps) {
   const ref = useRef(null);
   useEffect(() => {
     const canvas = ref.current;
@@ -116,121 +34,109 @@ function useCanvasDraw(draw) {
       const ctx = canvas.getContext('2d');
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
-      try { draw(ctx, w, h); } catch {}
+      try { draw(ctx, w, h); } catch { /* Canvas noch ohne Größe */ }
     };
     render();
     const ro = new ResizeObserver(render);
     ro.observe(canvas);
     return () => ro.disconnect();
-  });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
   return ref;
 }
 
-function niceTime(ts, span) {
-  const d = new Date(ts);
-  if (span > 2 * 86400000) return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
-  return d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
-}
-
-// ---------------- Linien-Chart (z.B. Board-Index) ----------------
-export function LineChart({ points, showLabels = true }) {
-  const data = (points || []).filter((p) => p && isFinite(p.v));
-  const ref = useCanvasDraw((ctx, w, h) => {
-    if (data.length < 2) {
-      ctx.fillStyle = LABEL;
-      ctx.font = '600 14px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('Index-Historie wird aufgebaut …', w / 2, h / 2);
-      return;
-    }
-    const padR = showLabels ? 74 : 10, padT = 6, padB = 6, padL = 4;
-    const plotW = w - padL - padR, plotH = h - padT - padB;
-    let min = Infinity, max = -Infinity;
-    for (const p of data) { min = Math.min(min, p.v); max = Math.max(max, p.v); }
-    if (min === max) { min -= 1; max += 1; }
-    const up = data[data.length - 1].v >= data[0].v;
-    const col = up ? GREEN : RED;
-    const x = (i) => padL + (plotW * i) / (data.length - 1);
-    const y = (v) => padT + plotH * (1 - (v - min) / (max - min));
-
-    // Fläche
-    const grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
-    grad.addColorStop(0, up ? 'rgba(14,203,129,0.24)' : 'rgba(246,70,93,0.24)');
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.beginPath();
-    ctx.moveTo(x(0), padT + plotH);
-    for (let i = 0; i < data.length; i++) ctx.lineTo(x(i), y(data[i].v));
-    ctx.lineTo(x(data.length - 1), padT + plotH);
-    ctx.closePath();
-    ctx.fillStyle = grad;
-    ctx.fill();
-
-    // Linie
-    ctx.beginPath();
-    for (let i = 0; i < data.length; i++) { if (i === 0) ctx.moveTo(x(i), y(data[i].v)); else ctx.lineTo(x(i), y(data[i].v)); }
-    ctx.strokeStyle = col;
-    ctx.lineWidth = 2.5;
-    ctx.lineJoin = 'round';
-    ctx.stroke();
-
-    // Endpunkt
-    ctx.beginPath();
-    ctx.arc(x(data.length - 1), y(data[data.length - 1].v), 4, 0, Math.PI * 2);
-    ctx.fillStyle = col;
-    ctx.fill();
-
-    if (showLabels) {
-      ctx.font = '700 12px sans-serif';
-      ctx.fillStyle = LABEL;
-      ctx.textAlign = 'left';
-      ctx.fillText(String(Math.round(max)), padL + plotW + 8, padT + 12);
-      ctx.fillText(String(Math.round(min)), padL + plotW + 8, padT + plotH);
-      ctx.fillStyle = col;
-      ctx.font = '800 13px sans-serif';
-      ctx.fillText(String(Math.round(data[data.length - 1].v)), padL + plotW + 8, y(data[data.length - 1].v) + 4);
-    }
-  });
-  return <canvas ref={ref} />;
-}
-
-// ---------------- Sparkline (Positions-/Marktliste) ----------------
-export function Sparkline({ values, w = 76, h = 30, fill = true }) {
-  const data = (values || []).filter((v) => isFinite(v));
+// ---------------- Sparkline (Markt- und Depotliste) ----------------
+// tone: 'up' | 'down' — feste Färbung (z. B. nach Gewinn); ohne Angabe nach Verlauf.
+export function Sparkline({ values, w = 76, h = 30, fill = true, tone }) {
+  const data = useMemo(() => (values || []).filter((v) => isFinite(v)), [values]);
   const ref = useCanvasDraw((ctx) => {
     if (data.length < 2) return;
     let min = Infinity, max = -Infinity;
     for (const v of data) { min = Math.min(min, v); max = Math.max(max, v); }
     if (min === max) { min -= 1; max += 1; }
-    const up = data[data.length - 1] >= data[0];
-    const col = up ? GREEN : RED;
+    const up = tone ? tone === 'up' : data[data.length - 1] >= data[0];
+    const p = pal();
+    const col = up ? p.up : p.down;
     const x = (i) => (w * i) / (data.length - 1);
     const y = (v) => 3 + (h - 6) * (1 - (v - min) / (max - min));
-
     if (fill) {
-      const grad = ctx.createLinearGradient(0, 0, 0, h);
-      grad.addColorStop(0, up ? 'rgba(14,203,129,0.22)' : 'rgba(246,70,93,0.22)');
-      grad.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.beginPath();
       ctx.moveTo(0, h);
       data.forEach((v, i) => ctx.lineTo(x(i), y(v)));
       ctx.lineTo(w, h);
       ctx.closePath();
-      ctx.fillStyle = grad;
+      ctx.fillStyle = rgba(col, 0.16);
       ctx.fill();
     }
-
     ctx.beginPath();
     data.forEach((v, i) => { if (i === 0) ctx.moveTo(x(i), y(v)); else ctx.lineTo(x(i), y(v)); });
     ctx.strokeStyle = col;
     ctx.lineWidth = 1.6;
     ctx.lineJoin = 'round';
     ctx.stroke();
-
-    // Endpunkt
     ctx.beginPath();
     ctx.arc(x(data.length - 1), y(data[data.length - 1]), 2.2, 0, Math.PI * 2);
     ctx.fillStyle = col;
     ctx.fill();
-  });
+  }, [data, w, h, fill, tone]);
   return <canvas ref={ref} style={{ width: w, height: h, display: 'block' }} />;
+}
+
+// ---------------- Linienchart (z. B. Index auf dem Beamer) ----------------
+// points: [{ t, v }] — mit Achsenbeschriftung (Handel: Lehre aus Trading 212).
+export function LineChart({ points, showLabels = true }) {
+  const data = useMemo(() => (points || []).filter((p) => p && isFinite(p.v)), [points]);
+  const ref = useCanvasDraw((ctx, w, h) => {
+    const p = pal();
+    if (data.length < 2) {
+      ctx.fillStyle = p.text;
+      ctx.font = `600 14px ${p.font}`;
+      ctx.textAlign = 'center';
+      ctx.fillText('Wird aufgebaut …', w / 2, h / 2);
+      return;
+    }
+    const padR = showLabels ? 84 : 10, padT = 8, padB = 8, padL = 4;
+    const plotW = Math.max(1, w - padL - padR), plotH = Math.max(1, h - padT - padB);
+    let min = Infinity, max = -Infinity;
+    for (const d of data) { min = Math.min(min, d.v); max = Math.max(max, d.v); }
+    if (min === max) { min -= 1; max += 1; }
+    const up = data[data.length - 1].v >= data[0].v;
+    const col = up ? p.up : p.down;
+    const x = (i) => padL + (plotW * i) / (data.length - 1);
+    const y = (v) => padT + plotH * (1 - (v - min) / (max - min));
+
+    // Fläche unter der Linie, flach und leise
+    ctx.beginPath();
+    ctx.moveTo(x(0), padT + plotH);
+    for (let i = 0; i < data.length; i++) ctx.lineTo(x(i), y(data[i].v));
+    ctx.lineTo(x(data.length - 1), padT + plotH);
+    ctx.closePath();
+    ctx.fillStyle = rgba(col, 0.12);
+    ctx.fill();
+
+    ctx.beginPath();
+    for (let i = 0; i < data.length; i++) { if (i === 0) ctx.moveTo(x(i), y(data[i].v)); else ctx.lineTo(x(i), y(data[i].v)); }
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(x(data.length - 1), y(data[data.length - 1].v), 3, 0, Math.PI * 2);
+    ctx.fillStyle = col;
+    ctx.fill();
+
+    if (showLabels) {
+      const fmt = (v) => v.toLocaleString('de-DE', { maximumFractionDigits: 0 });
+      ctx.textAlign = 'left';
+      ctx.font = `600 12px ${p.font}`;
+      ctx.fillStyle = p.text;
+      ctx.fillText(fmt(max), padL + plotW + 8, padT + 12);
+      ctx.fillText(fmt(min), padL + plotW + 8, padT + plotH);
+      ctx.fillStyle = col;
+      ctx.font = `700 13px ${p.font}`;
+      ctx.fillText(fmt(data[data.length - 1].v), padL + plotW + 8, Math.min(padT + plotH, Math.max(padT + 12, y(data[data.length - 1].v) + 4)));
+    }
+  }, [data, showLabels]);
+  return <canvas ref={ref} />;
 }

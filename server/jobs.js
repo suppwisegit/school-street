@@ -1,5 +1,5 @@
-// Hintergrund-Jobs: Wocheneinkommen, Market-Maker-Refresh, Ghost-Accounts,
-// Kapitalerhöhungs-Beobachtung (Kurs über Schwelle), Preis-Sampler für Charts,
+// Hintergrund-Jobs: Einkommen, Market-Maker-Refresh, Ghost-Accounts,
+// Preis-Sampler für Charts, Aufräumen alter Zeilen,
 // ETF-Auto-Arbitrage (AP-Automatik, wenn etf_auto=1).
 const { db, getSettings, q, addNews } = require('./db');
 const bus = require('./bus');
@@ -20,14 +20,14 @@ function payIncome() {
   });
   pay();
   state.last_income = Date.now();
-  const n = addNews('system', '💰 Wocheneinkommen ausgezahlt',
+  const n = addNews('system', 'Wocheneinkommen ausgezahlt',
     `Alle ${users.length} Trader haben ${(s.income_cent / 100).toFixed(0)} Credits erhalten. Viel Erfolg an der School-Street!`);
   bus.emit({ type: 'news', news: n });
 }
 
 function ghostCleanup() {
   const s = getSettings();
-  const cutoff = Date.now() - s.inactivity_sec;
+  const cutoff = Date.now() - s.inactivity_sec * 1000; // Einstellung steht in Sekunden
   // Bots (is_bot) sind ausgenommen: sie "loggen sich nie ein" und dürfen vom
   // Ghost-Cleanup nicht weggeräumt werden.
   const ghosts = db.prepare("SELECT * FROM users WHERE role='user' AND is_bot=0 AND last_active < ?").all(cutoff);
@@ -60,23 +60,9 @@ function ghostCleanup() {
     }
   });
   clean();
-  const n = addNews('system', '👻 Ghost-Accounts entfernt',
+  const n = addNews('system', 'Ghost-Accounts entfernt',
     `${ghosts.length} inaktive Konten wurden gelöscht. Das Vermögen fällt an die Investment AG (den Staat) und fließt als Streubesitz zurück in den Markt: ${ghosts.map(g => g.username).join(', ')}`);
   bus.emit({ type: 'news', news: n });
-}
-
-function capitalWatch() { // stündlich: Kurs über Schwelle?
-  for (const book of engine.books.values()) {
-    const sec = book.sec;
-    if (sec.type !== 'stock' || !sec.threshold_price) continue;
-    if (book.last >= sec.threshold_price) {
-      db.prepare('UPDATE securities SET hours_above = hours_above + 1 WHERE id = ?').run(sec.id);
-      sec.hours_above++;
-    } else if (sec.hours_above > 0) {
-      db.prepare('UPDATE securities SET hours_above = 0 WHERE id = ?').run(sec.id);
-      sec.hours_above = 0;
-    }
-  }
 }
 
 function priceSampler() {
@@ -90,9 +76,21 @@ function priceSampler() {
 // damit Serverstart (loadEngine) und Admin-Ansichten schnell bleiben.
 function pruneOrders() {
   const day = 86400000;
-  const r1 = db.prepare("DELETE FROM orders WHERE is_mm = 1 AND created_at < ?").run(Date.now() - day);
-  const r2 = db.prepare("DELETE FROM orders WHERE is_mm = 0 AND status = 'canceled' AND created_at < ?").run(Date.now() - 14 * day);
-  if (r1.changes + r2.changes > 0) console.log(`[Job prune-orders] ${r1.changes} MM- + ${r2.changes} Spieler-Orders entfernt`);
+  const now = Date.now();
+  const r1 = db.prepare("DELETE FROM orders WHERE is_mm = 1 AND created_at < ?").run(now - day);
+  const r2 = db.prepare("DELETE FROM orders WHERE is_mm = 0 AND status = 'canceled' AND created_at < ?").run(now - 14 * day);
+  // Kursverlauf und Sitzungen älter als 30 Tage weg — der Sampler schreibt ~2.900
+  // Zeilen je Wert und Tag, sonst wächst die Datei unbegrenzt. In Happen, damit
+  // ein großer Altbestand die Börse beim ersten Aufräumen nicht blockiert.
+  const r3 = db.prepare('DELETE FROM price_history WHERE rowid IN (SELECT rowid FROM price_history WHERE ts < ? LIMIT 20000)').run(now - 30 * day);
+  const r4 = db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(now);
+  if (r1.changes + r2.changes + r3.changes + r4.changes > 0) console.log(`[Job prune-orders] ${r1.changes} MM- + ${r2.changes} Spieler-Orders, ${r3.changes} Kurspunkte, ${r4.changes} Sitzungen entfernt`);
+}
+
+// Wann kommt das nächste Einkommen? (null = Einkommen ist aus)
+function incomeNextAt() {
+  const sec = getSettings().income_sec;
+  return sec > 0 ? state.last_income + sec * 1000 : null;
 }
 
 // Ein fehlgeschlagener Job darf niemals die ganze Börse mitreißen
@@ -107,13 +105,13 @@ function startJobs() {
   state.timers.forEach(clearInterval);
   state.timers = [
     setInterval(safe('income', () => {
-      if (Date.now() - state.last_income >= getSettings().income_sec * 1000) payIncome();
+      const incomeSec = getSettings().income_sec;
+      if (incomeSec > 0 && Date.now() - state.last_income >= incomeSec * 1000) payIncome(); // 0 = Einkommen ist aus
     }), 1000),
     // MM-Refresh: schneller Loop, aber jedes Buch hat seinen eigenen gestaffelten
     // Takt (mm_refresh_sec ± 30%) — die Bücher wirken lebendig, nicht synchron.
     setInterval(safe('mm-refresh', () => engine.mmRefreshAll()), 3000),
     setInterval(safe('ghost-cleanup', ghostCleanup), 10 * 60 * 1000),
-    setInterval(safe('capital-watch', capitalWatch), 60 * 60 * 1000),
     setInterval(safe('price-sampler', priceSampler), 30 * 1000),
     setInterval(safe('prune-orders', pruneOrders), 60 * 60 * 1000),
     setInterval(safe('etf-auto', () => {
@@ -125,4 +123,4 @@ function startJobs() {
   safe('prune-orders', pruneOrders)();
 }
 
-module.exports = { startJobs, payIncome, ghostCleanup, state };
+module.exports = { startJobs, payIncome, ghostCleanup, incomeNextAt, state };

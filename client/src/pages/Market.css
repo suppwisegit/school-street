@@ -1,0 +1,103 @@
+/* Markt: Suche und Filter, darunter die Liste. Nur Tokens aus DESIGN.md. */
+
+.mkt {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Suche und Filter: nebeneinander, wenn es reicht, sonst untereinander. */
+.mkt-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 16px;
+}
+.mkt-search {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.mkt-search > input {
+  font: inherit;
+}
+.mkt-filter {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.mkt-filter > * {
+  width: auto;
+}
+.mkt-filter .seg-btn {
+  flex: 0 0 auto; /* nach Inhalt: „Gewinner“ und „Verlierer“ nie abschneiden */
+}
+
+/* Zeilen laufen bis zum Bildschirmrand, ihr Inhalt beginnt am Seitenrand. */
+.page.mkt > .mkt-flash {
+  padding-inline: 0;
+}
+/* Die Zeile liegt schon im randvollen Flash: nur Innenabstand, kein zweiter
+   negativer Außenabstand (sonst klebt der Text am Bildschirmrand). */
+.mkt-flash > .mkt-row {
+  padding-inline: var(--ss-gutter);
+}
+
+/* Eine Zeile: Kürzel + Name links, Kurve und Kurs rechts. */
+.mkt-id {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.mkt-side {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 16px;
+}
+.mkt-spark {
+  display: grid;
+  place-items: center;
+  width: 56px; /* bleibt frei, bis die Kurve da ist — nichts springt */
+  height: 28px;
+}
+.mkt-quote {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 84px;
+  text-align: right;
+  line-height: 1.05;
+}
+.mkt-last {
+  font-size: var(--ss-fs-base);
+  font-weight: 700;
+  color: var(--ss-text);
+}
+.mkt-chg {
+  font-size: var(--ss-fs-sm);
+  font-weight: 600;
+}
+
+/* Hinweis, wenn nur die Kurven (nicht die Kurse) fehlen. */
+.mkt-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  color: var(--ss-text-2);
+  font-size: var(--ss-fs-sm);
+}
+
+/* Nur für Screenreader: Trefferzahl bei Suche und Filter. */
+.mkt-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

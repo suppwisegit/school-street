@@ -1,216 +1,184 @@
-// Depot: Hero-Zahl Gesamtvermögen, Sub-Stats, Positionen als Karten mit
-// 24h-Sparkline, Trophäen, offene Orders + Historie.
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useOutletContext } from 'react-router-dom';
-import { IconCrown, IconSchool, IconSnowflake } from '@tabler/icons-react';
-import { api, dateTimeStr, fmtC } from '../api.js';
-import { Sparkline } from '../charts.jsx';
+// Depot: Der Depotwert ist die eine große Zahl, live mit den Kursen. Darunter
+// Cash und Investiert, die Positionen, offene Orders und der Verlauf.
+// Abfragen (Budget V4): /portfolio und /orders beim Öffnen, bei `dirty` und
+// sicherheitshalber alle 60 s — die Kurse selbst kommen aus dem Ticker-Speicher
+// und kosten keine Abfrage.
+import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
-  Card, Empty, ErrorBox, HeroMoney, Money, Pct, Skel, SkelRows, Trophy, usePriceFlash, useToast
+  Button, Empty, ErrorBox, LivePrice, Money, Num, Pct, Row, Section, SkelRows, Symbol, useToast,
 } from '../ui.jsx';
-import { AvatarTile } from '../ui.jsx';
+import { getTickerRow, useDirty, usePoll, useTicker, useTickerRow } from '../hooks.jsx';
+import { api, dateTimeStr, fmtC } from '../api.js';
+import './Depot.css';
 
-const STATUS = { open: 'offen', filled: 'ausgeführt', canceled: 'storniert' };
+const REFRESH_MS = 60000;
+const sign = (v) => (v >= 0 ? '+' : '−');
+const lastOf = (p) => {
+  const t = getTickerRow(p.security_id);
+  return t && t.last != null ? t.last : p.last;
+};
 
-export default function DepotTab() {
-  const { ver, bump } = useOutletContext();
+// Eine Position. Rendert nur neu, wenn sich genau ihr Kurs ändert.
+const PositionRow = memo(function PositionRow({ p }) {
+  const t = useTickerRow(p.security_id);
+  const last = t && t.last != null ? t.last : p.last;
+  const pnl = (last - p.avg_cost) * p.amount;
+  const up = pnl >= 0;
+  return (
+    <Row
+      to={`/security/${p.security_id}`}
+      leading={(
+        <div className="dep-id">
+          <Symbol ticker={p.ticker} name={p.name} />
+          <span className="muted small">
+            <Num v={p.amount} /> Stück · gekauft zu {fmtC(p.avg_cost)}
+          </span>
+        </div>
+      )}
+      trailing={(
+        <>
+          <LivePrice value={p.amount * last} className="dep-value" />
+          <span className={`num small ${up ? 'pos' : 'neg'}`}>
+            {sign(pnl)}{fmtC(Math.abs(pnl))} · <Pct v={p.avg_cost > 0 ? ((last / p.avg_cost - 1) * 100) : 0} signed />
+          </span>
+        </>
+      )}
+    />
+  );
+});
+
+// Depotwert und offener Gewinn: rechnet mit den Live-Kursen aller Positionen.
+function Worth({ positions, cash }) {
+  const { version } = useTicker(); // ändert sich, sobald irgendein Kurs springt
+  let value = cash;
+  let pnl = 0;
+  for (const p of positions) {
+    const last = lastOf(p);
+    value += p.amount * last;
+    pnl += (last - p.avg_cost) * p.amount;
+  }
+  const basis = value - pnl;
+  const pct = basis > 0 ? (pnl / basis) * 100 : 0;
+  void version;
+  return (
+    <header className="dep-hero">
+      <p className="muted small">Depotwert</p>
+      <LivePrice value={value} className="num-hero" />
+      <p className={`dep-pnl ${pnl >= 0 ? 'pos' : 'neg'}`}>
+        {sign(pnl)}{fmtC(Math.abs(pnl))} · <Pct v={pct} signed /> im Depot
+      </p>
+    </header>
+  );
+}
+
+const SIDE = { buy: 'Kauf', sell: 'Verkauf' };
+const orderTitle = (o) => `${SIDE[o.side] || o.side} ${o.amount} ${o.ticker || ''}`.trim();
+function orderSub(o) {
+  const px = o.type === 'limit' ? `Limit ${fmtC(o.price)}` : 'Markt';
+  const part = o.status === 'open' && o.filled > 0 ? `, ${o.filled} ausgeführt` : '';
+  const state = o.status === 'open' ? `offen${part}` : o.status === 'filled' ? 'ausgeführt' : 'storniert';
+  return `${px} · ${state} · ${dateTimeStr(o.created_at)}`;
+}
+
+export default function Depot() {
   const toast = useToast();
+  const navigate = useNavigate();
   const [pf, setPf] = useState(null);
-  const [orders, setOrders] = useState(null);
-  const [sparks, setSparks] = useState({});
-  const [err, setErr] = useState('');
-  const heroFlash = usePriceFlash(pf ? pf.net_worth : 0);
+  const [orders, setOrders] = useState([]);
+  const [failed, setFailed] = useState(false);
+  const alive = useRef(true);
+
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
 
   const load = useCallback(async () => {
     try {
       const [p, o] = await Promise.all([api('/api/portfolio'), api('/api/orders')]);
+      if (!alive.current) return;
       setPf(p);
-      setOrders(o.orders || []);
-      setErr('');
-    } catch (e) {
-      setErr(e.message);
+      setOrders((o && o.orders) || []);
+      setFailed(false);
+    } catch {
+      if (alive.current) setFailed(true); // ohne Daten: Fehlerzustand; mit alten Daten: weiter anzeigen
     }
   }, []);
 
-  useEffect(() => { load(); }, [load, ver]);
+  useDirty(null, load);
+  usePoll(load, REFRESH_MS, [load]);
 
-  // 24h-Sparklines für alle Positionen (ein Request pro Wertpapier)
-  useEffect(() => {
-    if (!pf) return;
-    let alive = true;
-    for (const p of pf.positions || []) {
-      if (sparks[p.security_id]) continue;
-      api(`/api/securities/${p.security_id}/candles`, { params: { bucket: 1800000, range: 86400000 } })
-        .then((r) => { if (alive) setSparks((s) => ({ ...s, [p.security_id]: (r.candles || []).map((c) => c.c) })); })
-        .catch(() => {});
-    }
-    return () => { alive = false; };
-  }, [pf]); // eslint-disable-line
-
-  const cancel = async (o) => {
+  const cancel = useCallback(async (id) => {
     try {
-      await api(`/api/orders/${o.id}`, { method: 'DELETE' });
-      toast(`Order ${o.ticker} storniert`, 'ok');
-      load(); bump();
+      await api(`/api/orders/${id}`, { method: 'DELETE' });
+      toast('Order storniert.', 'ok');
+      await load();
     } catch (e) {
-      toast(e.message, 'err');
+      toast(e && e.message ? e.message : 'Das ging nicht.', 'err');
     }
-  };
+  }, [load, toast]);
 
-  if (err) return <ErrorBox>{err}</ErrorBox>;
-  if (!pf) return (
-    <div className="col" style={{ gap: 12 }}>
-      <Skel h={130} radius={20} />
-      <SkelRows n={3} h={70} />
-    </div>
-  );
+  if (!pf) {
+    return (
+      <div className="page depot">
+        {failed
+          ? <ErrorBox onRetry={load}>Das Depot konnte nicht geladen werden. Prüf deine Verbindung.</ErrorBox>
+          : <SkelRows n={6} h={56} />}
+      </div>
+    );
+  }
 
-  const openOrders = (orders || []).filter((o) => o.status === 'open');
-  const history = (orders || []).filter((o) => o.status !== 'open').slice(0, 12);
-  const unreal = (pf.positions || []).reduce((a, p) => a + p.pnl, 0);
-  const posValue = (pf.positions || []).reduce((a, p) => a + p.value, 0);
-  const unrealPct = posValue > 0 ? (unreal / (posValue - unreal)) * 100 : 0;
+  const open = orders.filter((o) => o.status === 'open');
+  const history = orders.filter((o) => o.status !== 'open').slice(0, 20);
+  const invested = pf.positions.reduce((s, p) => s + p.value, 0);
 
   return (
-    <div className="col enter" style={{ gap: 12 }}>
-      {/* Hero: Gesamtvermögen */}
-      <div className={`hero ${heroFlash}`}>
-        <div className="lbl">Gesamtvermögen</div>
-        <div className="heronum"><HeroMoney cents={pf.net_worth} /></div>
-        <div className="herosub">
-          <span className={`chip ${unreal > 0 ? 'green' : unreal < 0 ? 'red' : ''}`}>
-            <Money c={unreal} signed /> <Pct v={unrealPct} />
-          </span>
-          <span className="muted small">unrealisiert</span>
-        </div>
-      </div>
+    <div className="page depot">
+      <Worth positions={pf.positions} cash={pf.cash} />
+      {failed && <ErrorBox onRetry={load}>Die Zahlen sind nicht mehr aktuell. Prüf deine Verbindung.</ErrorBox>}
 
-      {/* Sub-Stats */}
-      <div className="statgrid">
-        <div className="stat">
-          <div className="lbl">Kontostand</div>
-          <div className="val num">{fmtC(pf.cash)}</div>
-        </div>
-        <div className="stat">
-          <div className="lbl">Depotwert</div>
-          <div className="val num">{fmtC(posValue)}</div>
-        </div>
-        <div className="stat">
-          <div className="lbl">Realisiert</div>
-          <div className="val num" style={{ color: pf.realized_pl > 0 ? 'var(--up)' : pf.realized_pl < 0 ? 'var(--down)' : undefined }}>
-            {pf.realized_pl > 0 ? '+' : ''}{fmtC(pf.realized_pl)}
-          </div>
-        </div>
-      </div>
+      <Section>
+        <Row title="Cash" trailing={<Money c={pf.cash} className="dep-fact" />} />
+        <Row title="Investiert" trailing={<Money c={invested} className="dep-fact" />} />
+      </Section>
 
-      <Badges pf={pf} />
-
-      <Card title={`Positionen · ${(pf.positions || []).length}`}>
-        {(pf.positions || []).length === 0 ? (
-          <Empty>Noch keine Positionen – <Link to="/">am Markt kaufen</Link>.</Empty>
+      <Section title="Positionen">
+        {pf.positions.length === 0 ? (
+          <Empty title="Noch nichts im Depot." className="dep-empty">
+            Kauf deine erste Aktie — im Markt.
+            <Button variant="primary" onClick={() => navigate('/')}>Zum Markt</Button>
+          </Empty>
         ) : (
-          (pf.positions || []).map((p) => (
-            <Link key={p.security_id} to={`/security/${p.security_id}`} style={{ textDecoration: 'none', color: 'inherit' }}>
-              <div className="poscard">
-                <AvatarTile seed={p.ticker} label={p.ticker} size={36} radius={11} />
-                <div className="grow">
-                  <div className="row" style={{ gap: 6 }}>
-                    <span className="tkr">{p.ticker}</span>
-                    {p.type === 'etf' && <span className="etfchip">ETF</span>}
-                  </div>
-                  <div className="meta num">{p.amount} Stück · Ø {fmtC(p.avg_cost)}</div>
-                </div>
-                <div className="spark">
-                  {sparks[p.security_id]?.length > 1
-                    ? <Sparkline values={sparks[p.security_id]} />
-                    : <Skel w={76} h={30} />}
-                </div>
-                <div className="px">
-                  <div className="v num">{fmtC(p.value)}</div>
-                  <div className="g"><Money c={p.pnl} colored signed /></div>
-                </div>
-              </div>
-            </Link>
-          ))
+          pf.positions.map((p) => <PositionRow key={p.security_id} p={p} />)
         )}
-      </Card>
+      </Section>
 
-      <Card title={`Offene Orders · ${openOrders.length}`}>
-        {openOrders.length === 0 ? (
-          <Empty>Keine offenen Orders.</Empty>
-        ) : (
-          openOrders.map((o) => (
-            <div className="row between" key={o.id} style={{ padding: '6px 0', borderBottom: '1px solid #17171d' }}>
-              <div>
-                <b>{o.ticker}</b>{' '}
-                <span className={`small ${o.side === 'buy' ? 'pos' : 'neg'}`}>{o.side === 'buy' ? 'Kauf' : 'Verkauf'}</span>{' '}
-                <span className="muted small num">{o.type === 'limit' ? fmtC(o.price) : 'Market'} · {o.filled}/{o.amount}</span>
-              </div>
-              <button className="btn sm danger" onClick={() => cancel(o)}>Storno</button>
-            </div>
-          ))
-        )}
-      </Card>
+      {open.length > 0 && (
+        <Section title="Offene Orders">
+          {open.map((o) => (
+            <Row
+              key={o.id}
+              title={orderTitle(o)}
+              sub={orderSub(o)}
+              trailing={<Button variant="ghost" size="sm" onClick={() => cancel(o.id)}>Storno</Button>}
+            />
+          ))}
+        </Section>
+      )}
 
-      <Card title="Order-Historie">
-        {history.length === 0 ? (
-          <Empty>Noch keine abgeschlossenen Orders.</Empty>
-        ) : (
-          history.map((o) => (
-            <div className="row between small" key={o.id} style={{ padding: '5px 0', borderBottom: '1px solid #17171d' }}>
-              <span>
-                <b>{o.ticker}</b> <span className={o.side === 'buy' ? 'pos' : 'neg'}>{o.side === 'buy' ? 'K' : 'V'}</span>
-                <span className="muted num"> {o.filled}/{o.amount} {o.type === 'limit' ? '@ ' + fmtC(o.price) : 'Market'}</span>
-              </span>
-              <span className="muted num">{STATUS[o.status] || o.status} · {dateTimeStr(o.created_at)}</span>
-            </div>
-          ))
-        )}
-      </Card>
+      {history.length > 0 && (
+        <Section title="Verlauf">
+          {history.map((o) => (
+            <Row
+              key={o.id}
+              title={orderTitle(o)}
+              sub={orderSub(o)}
+              to={o.security_id ? `/security/${o.security_id}` : undefined}
+            />
+          ))}
+        </Section>
+      )}
     </div>
-  );
-}
-
-function Badges({ pf }) {
-  const b = pf.badges || {};
-  const items = [];
-  for (const t of b.founder || []) {
-    items.push(
-      <Trophy
-        key={'f' + t}
-        rarity="rare"
-        icon={<IconSchool stroke={1.8} />}
-        title={`Gründer · ${t}`}
-        desc="Unternehmen an die Börse gebracht"
-      />
-    );
-  }
-  if (b.bagholder) {
-    items.push(
-      <Trophy
-        key="bag"
-        rarity="shame"
-        icon={<IconSnowflake stroke={1.8} />}
-        title="Bagholder"
-        desc="Position über 50 % unter Einstand"
-      />
-    );
-  }
-  if (b.takeover_king) {
-    items.push(
-      <Trophy
-        key="tk"
-        rarity="legendary"
-        icon={<IconCrown stroke={1.8} />}
-        title="Takeover-King"
-        desc={`Mehrheit bei ${(b.takeovers || []).join(', ')}`}
-      />
-    );
-  }
-  if (!items.length) return null;
-  return (
-    <Card title="Trophäen">
-      <div className="trophygrid">{items}</div>
-    </Card>
   );
 }

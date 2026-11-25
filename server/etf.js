@@ -279,7 +279,7 @@ function autoArbitrage() {
         }
         const r = createUnits(etfSec.id, units);
         autoLastAt.set(etfSec.id, Date.now());
-        autoNews(etfSec, `🤖 Auto-Arbitrage: ${units} Creation Units ${etfSec.ticker}`,
+        autoNews(etfSec, `Auto-Arbitrage: ${units} Creation Units ${etfSec.ticker}`,
           `Der ${etfSec.name} notierte ${(premium * 100).toFixed(1)}% ÜBER seinem NAV (${fmtCr(n.nav_per_share)}). Der AP-Algorithmus hat Korb gekauft, ${r.shares_created} neue Anteile geschaffen und verkauft sie nahe am NAV — der Kurs wird gezogen.`);
         actions.push({ ticker: etfSec.ticker, action: 'creation', units, premium_pct: Math.round(premium * 1000) / 10 });
       } else {
@@ -293,7 +293,7 @@ function autoArbitrage() {
           const relive = Math.max(1, Math.min(2, maxBySupply));
           const r = createUnits(etfSec.id, relive);
           autoLastAt.set(etfSec.id, Date.now());
-          autoNews(etfSec, `🤖 Auto-Arbitrage: ${relive} Units ${etfSec.ticker} nachgeschaffen`,
+          autoNews(etfSec, `Auto-Arbitrage: ${relive} Units ${etfSec.ticker} nachgeschaffen`,
             `Der ${etfSec.name} hatte keine handelbare Angebotsseite mehr (${(premium * 100).toFixed(1)}% unter NAV). Der AP hat ${r.shares_created} Anteile nachgeschaffen — der Handel am letzten Kurs läuft wieder, Käufer ziehen den Kurs Richtung NAV (${fmtCr(n.nav_per_share)}).`);
           actions.push({ ticker: etfSec.ticker, action: 'relive', units: relive, premium_pct: Math.round(premium * 1000) / 10 });
           continue;
@@ -310,7 +310,7 @@ function autoArbitrage() {
         }
         const r = redeemUnits(etfSec.id, units);
         autoLastAt.set(etfSec.id, Date.now());
-        autoNews(etfSec, `🤖 Auto-Arbitrage: ${units} Units ${etfSec.ticker} eingelöst`,
+        autoNews(etfSec, `Auto-Arbitrage: ${units} Units ${etfSec.ticker} eingelöst`,
           `Der ${etfSec.name} notierte ${(premium * 100).toFixed(1)}% UNTER seinem NAV (${fmtCr(n.nav_per_share)}). Der AP-Algorithmus kauft Anteile zurück und hat ${r.shares_redeemed} Stück eingelöst — die Korb-Aktien kommen zurück in den Markt, der ETF-Kurs steigt.`);
         actions.push({ ticker: etfSec.ticker, action: 'redemption', units, premium_pct: Math.round(premium * 1000) / 10 });
       }

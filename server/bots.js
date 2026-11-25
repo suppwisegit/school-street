@@ -97,7 +97,7 @@ function listBotCompany(founder, c) {
   db.prepare('UPDATE users SET cash = cash + ? WHERE id=?').run(ipo * floatShares, founder.id);
   db.prepare('UPDATE users SET cash = cash - ? WHERE id=?').run(ipo * floatShares, t.id);
   engine.mmRecenter(engine.books.get(sec.id));
-  const n = addNews('ipo', `🔔 IPO: ${sec.name} (${sec.ticker}) startet zum Kurs ${(ipo / 100).toFixed(2)}`,
+  const n = addNews('ipo', `IPO: ${sec.name} (${sec.ticker}) startet zum Kurs ${(ipo / 100).toFixed(2)}`,
     `${founder.username} hat mit ${sec.name} den Börsengang geschafft! ${founderShares} Gründeraktien (Lock-up), ${floatShares} Stück Streubesitz. Konzept: ${c.description}`, sec.id);
   bus.emit({ type: 'news', news: n });
   bus.emit({ type: 'ticker', ticker: engine.tickerRow(sec.id) });
@@ -184,11 +184,19 @@ function pickSecurity(pool) {
   return pool[(Math.random() * pool.length) | 0];
 }
 
+// Stammdaten je Tick einmal lesen statt je Handelsversuch (der Kontostand wird
+// trotzdem frisch geholt, siehe botAcct).
+const tickCache = { secs: [], bots: [] };
+function loadTickCache() {
+  tickCache.secs = db.prepare("SELECT * FROM securities WHERE status='active'").all();
+  tickCache.bots = db.prepare("SELECT * FROM users WHERE role='user' AND is_bot=1 AND frozen=0").all();
+}
+
 // Ein Versuch. Liefert true, wenn tatsächlich eine Order aufgelegt wurde —
 // stille Skips (pleite, kein Bestand, leeres Buch) liefern false, damit der
 // Tick nachlegen kann und die Ziel-Handelsfrequenz wirklich ankommt.
 function oneTrade() {
-  const secs = db.prepare("SELECT * FROM securities WHERE status='active'").all();
+  const secs = tickCache.secs;
   const stocks = secs.filter(s => s.type === 'stock');
   const etfs = secs.filter(s => s.type === 'etf');
   let pool = stocks;
@@ -199,7 +207,7 @@ function oneTrade() {
   let book = engine.books.get(sec.id);
   if (!book) return false;
 
-  const bots = db.prepare("SELECT * FROM users WHERE role='user' AND is_bot=1 AND frozen=0").all();
+  const bots = tickCache.bots;
   if (!bots.length) return false;
   const bot = bots[(Math.random() * bots.length) | 0];
   const botAcct = q.userById.get(bot.id); // frischer Cash-Stand (Escrow!)
@@ -295,23 +303,32 @@ function reapStaleBotOrders() {
 
 function tick() {
   if (!state.running) return;
+  let n = 0;
   try {
     reapStaleBotOrders();
     const s = getSettings();
+    if (s.trading_paused) return; // Börse pausiert: auch die Bots halten still
+    loadTickCache();
     let exp = (s.bot_activity / 100) * 2; // erwartete Trades je Tick
     if (s.bot_fast) exp *= 100;           // Fast-Mode: Muster-/MM-Tests in Minuten statt Stunden
-    let n = Math.min(200, Math.floor(exp)); // Deckel schützt die Engine
+    n = Math.min(200, Math.floor(exp)); // Deckel schützt die Engine
     if (Math.random() < exp - Math.floor(exp)) n = Math.min(200, n + 1);
-    // Skips (pleite, leerer Bestand, …) bis zu 3x nachlegen — sonst kommt die
-    // Ziel-Frequenz nie an, weil viele Würfe still verfallen.
-    let done = 0, tries = 0;
-    while (done < n && tries++ < n * 3) {
-      try { if (oneTrade()) done++; } catch (e) { state.errors++; } // pleite/leeres Buch/… — egal
-    }
   } catch (e) {
     state.errors++;
     console.error('[Bots] Tick-Fehler:', e.message);
+    return;
   }
+  // Skips (pleite, leerer Bestand, …) bis zu 3x nachlegen — sonst kommt die
+  // Ziel-Frequenz nie an, weil viele Würfe still verfallen.
+  // Ein Handelsversuch je Event-Loop-Durchlauf: HTTP und WebSocket werden
+  // zwischen den Trades bedient, statt auf einen Bot-Block warten zu müssen.
+  let done = 0, tries = 0;
+  const step = () => {
+    if (!state.running || done >= n || tries++ >= n * 3) return;
+    try { if (oneTrade()) done++; } catch (e) { state.errors++; } // pleite/leeres Buch/… — egal
+    setImmediate(step);
+  };
+  step();
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +345,7 @@ function start(silent = false) {
   setSetting('bot_running', 1);
   console.log(`[Bots] Testspiel-Modus gestartet: ${getSettings().bot_count} Bots${created ? `, ${created} neue Bot-Firmen` : ''}.`);
   if (!silent) {
-    const n = addNews('system', '🤖 Testspiel-Modus aktiviert',
+    const n = addNews('system', 'Testspiel-Modus aktiviert',
       `Die Investment AG hat ${getSettings().bot_count} virtuelle Trader aktiviert — der Markt ist jetzt auch ohne echte Mitschüler lebendig.`);
     bus.emit({ type: 'news', news: n });
   }
@@ -341,7 +358,7 @@ function stop(silent = false) {
   setSetting('bot_running', 0);
   console.log('[Bots] Testspiel-Modus gestoppt.');
   if (!silent) {
-    const n = addNews('system', '🤖 Testspiel-Modus beendet', 'Die virtuellen Trader wurden deaktiviert.');
+    const n = addNews('system', 'Testspiel-Modus beendet', 'Die virtuellen Trader wurden deaktiviert.');
     bus.emit({ type: 'news', news: n });
   }
   return status();

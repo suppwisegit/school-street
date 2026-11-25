@@ -1,73 +1,62 @@
-// Login/Register-Karte für die Spieler-App.
+// Login und Registrierung: eine Spalte, ein Formular.
 import React, { useState } from 'react';
-import { IconTrendingUp } from '@tabler/icons-react';
+import { Button, ErrorBox, Field, Input, Segmented, useToast } from '../ui.jsx';
 import { api, setToken } from '../api.js';
-import { ErrorBox, Field, useToast } from '../ui.jsx';
+import './Player.css';
+
+const MODES = [
+  { value: 'login', label: 'Anmelden' },
+  { value: 'register', label: 'Konto anlegen' },
+];
 
 export default function Login({ onLogin }) {
+  const toast = useToast();
   const [mode, setMode] = useState('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
-  const toast = useToast();
-
-  const nameOk = username.trim().length >= 3 && username.trim().length <= 20;
-  const pwOk = password.length >= 4;
+  const name = username.trim();
+  const registering = mode === 'register';
 
   const submit = async (e) => {
     e.preventDefault();
     setErr('');
-    if (!nameOk) return setErr('Username: 3–20 Zeichen');
-    if (mode === 'register' && !pwOk) return setErr('Passwort: min. 4 Zeichen');
-    if (!pwOk) return setErr('Bitte Passwort eingeben (min. 4 Zeichen)');
+    if (name.length < 3 || name.length > 20) { setErr('Dein Name braucht 3 bis 20 Zeichen.'); return; }
+    if (password.length < 4) { setErr('Dein Passwort braucht mindestens 4 Zeichen.'); return; }
     setBusy(true);
     try {
-      const r = await api('/api/auth/' + (mode === 'login' ? 'login' : 'register'), {
-        method: 'POST',
-        body: { username: username.trim(), password }
-      });
+      const r = await api(`/api/auth/${registering ? 'register' : 'login'}`, { method: 'POST', body: { username: name, password } });
       setToken(r.token);
-      toast((mode === 'login' ? 'Willkommen zurück, ' : 'Depot eröffnet: ') + r.user.username, 'ok');
+      toast(registering ? 'Konto eröffnet. Viel Erfolg an der Börse.' : `Willkommen zurück, ${r.user.username}.`, 'ok');
       onLogin(r.user);
     } catch (e2) {
-      setErr(e2.message);
+      setErr((e2 && e2.message) || 'Das ging nicht.');
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="loginwrap">
-      <div className="logincard">
-        <div className="loginbrand">
-          <div className="bigmark"><IconTrendingUp stroke={2.1} /></div>
-          <h1>School<span className="street">Street</span></h1>
-          <p>Die Börse deiner Schule</p>
-        </div>
-        <div className="card">
-          <div className="tabs">
-            <button type="button" className={mode === 'login' ? 'on' : ''} onClick={() => { setMode('login'); setErr(''); }}>Login</button>
-            <button type="button" className={mode === 'register' ? 'on' : ''} onClick={() => { setMode('register'); setErr(''); }}>Registrieren</button>
-          </div>
-          <div style={{ height: 12 }} />
-          <ErrorBox>{err}</ErrorBox>
-          <form onSubmit={submit}>
-            <Field label="Username" help="3–20 Zeichen (Buchstaben, Zahlen, _ . -)">
-              <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="z.B. warren_b" autoComplete="username" />
-            </Field>
-            <Field label="Passwort" help={mode === 'register' ? 'min. 4 Zeichen' : undefined}>
-              <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••" autoComplete={mode === 'register' ? 'new-password' : 'current-password'} />
-            </Field>
-            <button className={`btn ${mode === 'register' ? 'primary' : 'buy'} block xl`} disabled={busy} type="submit">
-              {busy ? 'Bitte warten …' : mode === 'login' ? 'Einloggen' : 'Depot eröffnen'}
-            </button>
-          </form>
-          <div className="small muted center" style={{ marginTop: 10 }}>
-            Du startest mit 10.000 Credits Startkapital. <a href="/board">Zur Aula-Anzeige</a>
-          </div>
-        </div>
+    <form className="login" onSubmit={submit}>
+      <div>
+        <h1>School Street</h1>
+        <p className="muted">Die Börse deiner Schule.</p>
       </div>
-    </div>
+      <Segmented value={mode} onChange={setMode} options={MODES} aria-label="Anmelden oder Konto anlegen" />
+      <Field label="Name" help="3 bis 20 Zeichen. Buchstaben, Zahlen, _ . -">
+        <Input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus />
+      </Field>
+      <Field label="Passwort" help={registering ? 'Mindestens 4 Zeichen.' : undefined}>
+        <Input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete={registering ? 'new-password' : 'current-password'}
+        />
+      </Field>
+      <ErrorBox>{err}</ErrorBox>
+      <Button type="submit" variant="primary" size="lg" full loading={busy}>Rein</Button>
+    </form>
   );
 }
