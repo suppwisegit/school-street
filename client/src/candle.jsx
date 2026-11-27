@@ -49,7 +49,7 @@ export function CandleChart({ candles }) {
         fontSize: 12,
       },
       grid: { vertLines: { color: 'rgba(255,255,255,0.05)' }, horzLines: { color: 'rgba(255,255,255,0.05)' } },
-      rightPriceScale: { borderColor: p.line },
+      rightPriceScale: { borderColor: p.line, scaleMargins: { top: 0.2, bottom: 0.2 } },
       timeScale: { borderColor: p.line, timeVisible: true, secondsVisible: false, rightOffset: 2 },
       crosshair: {
         vertLine: { color: 'rgba(255,255,255,0.35)', width: 1, style: 3, labelBackgroundColor: p.line },

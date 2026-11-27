@@ -6,8 +6,10 @@ import { IconSearch } from '@tabler/icons-react';
 import {
   Button, Chip, Empty, ErrorBox, Flash, LivePrice, Pct, Row, Segmented, SkelRows, Symbol,
 } from '../ui.jsx';
-import { Sparkline, usePoll, useTicker, useTickerRow } from '../hooks.jsx';
+import { getTickerRow, Sparkline, usePoll, useTicker, useTickerRow } from '../hooks.jsx';
 import { api } from '../api.js';
+import IpoSection, { useIpo } from './IpoSection.jsx';
+import { NewsMini } from '../news/index.jsx';
 import './Market.css';
 
 const FILTERS = [
@@ -32,8 +34,16 @@ function matches(row, filter, needle) {
   return fold(row.ticker || '').includes(needle) || fold(row.name || '').includes(needle);
 }
 
+// Zusatz in der Kürzelzeile: ETF und/oder „neu an der Börse“ (Börsengang jünger als ipo_highlight_sec).
+const subOf = (row, fresh) => (
+  <>
+    {row.type === 'etf' ? <Chip tone="neutral">ETF</Chip> : null}
+    {fresh ? <Chip tone="neutral">Neu an der Börse</Chip> : null}
+  </>
+);
+
 // Eine Zeile. Rendert nur neu, wenn sich ihr Kurs, der Filter, die Suche oder ihre Kurve ändert.
-const SecurityRow = memo(function SecurityRow({ id, filter, needle, spark, report }) {
+const SecurityRow = memo(function SecurityRow({ id, filter, needle, spark, report, fresh }) {
   const row = useTickerRow(id);
   const hit = !!row && matches(row, filter, needle);
   // Meldet der Liste, ob diese Zeile gerade sichtbar ist (für „Nichts gefunden“ und die Trefferzahl).
@@ -50,7 +60,7 @@ const SecurityRow = memo(function SecurityRow({ id, filter, needle, spark, repor
             <Symbol
               ticker={row.ticker}
               name={row.name}
-              sub={row.type === 'etf' ? <Chip tone="neutral">ETF</Chip> : undefined}
+              sub={subOf(row, fresh)}
             />
           </div>
         )}
@@ -72,6 +82,7 @@ const SecurityRow = memo(function SecurityRow({ id, filter, needle, spark, repor
 
 export default function Market() {
   const { ready, ids } = useTicker();
+  const { list: newOnes, byId: newById } = useIpo();
   const [filter, setFilter] = useState('all');
   const [q, setQ] = useState('');
   const [sparks, setSparks] = useState(null); // { "<id>": [Cent, …] }
@@ -139,9 +150,10 @@ export default function Market() {
         needle={needle}
         spark={sparks && sparks[id]}
         report={report}
+        fresh={newById.has(id)}
       />
     )),
-    [ids, filter, needle, sparks, report],
+    [ids, filter, needle, sparks, report, newById],
   );
 
   if (!ready) {
@@ -194,6 +206,12 @@ export default function Market() {
       <p className="mkt-sr" role="status">
         {searching ? `${shown} von ${ids.length} Werten` : `${ids.length} ${ids.length === 1 ? 'Wert' : 'Werte'}`}
       </p>
+
+      {/* Börsengang: nur da, wenn ein Wert als neu gilt (sonst rendert er nichts) */}
+      <IpoSection list={newOnes} />
+
+      {/* News (T7c, DESIGN 9.4): die letzten drei Schlagzeilen in Kurzform über der Werteliste */}
+      <NewsMini limit={3} />
 
       {shown === 0 && (
         <Empty title="Nichts gefunden">

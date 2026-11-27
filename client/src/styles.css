@@ -151,6 +151,8 @@ button:disabled { cursor: default; }
 .chip.down { background: var(--ss-down-wash); color: var(--ss-down); }
 .chip.gold { background: var(--ss-gold-wash); color: var(--ss-gold); }
 .chip.warn { background: var(--ss-warn-wash); color: var(--ss-warn); }
+/* official: die „offizielle“ Stimme (Börse) — transparenter Grund, Rand wie der Ghost-Button */
+.chip.official { background: transparent; border: 1px solid var(--ss-line-strong); color: var(--ss-text); }
 
 .avatar {
   flex: none; display: inline-grid; place-items: center;

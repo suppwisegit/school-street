@@ -10,11 +10,17 @@ import {
   Sheet, SkelRows, Stepper, Symbol, useToast,
 } from '../../ui.jsx';
 import { usePoll } from '../../hooks.jsx';
+import './AdminSecurities.css';
+import AdminEtf from './AdminEtf.jsx';
 
 const fmtI = (n) => (Number(n) || 0).toLocaleString('de-DE');
 // Streubesitz: so viele Aktien kann die Klasse kaufen. Der Rest gehört dem Gründer.
 const DEFAULT_FLOAT = 2000;
 const FOUNDER_SHARES = 1000;
+// Antrag und Text eines Schülers bleiben vollständig stehen: Umbrechen statt abschneiden.
+const REQUESTED = new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+const fmtWhen = (ms) => (Number(ms) > 0 ? REQUESTED.format(new Date(Number(ms))) : '');
+const whenOf = (a) => (a.created_at ? `Gestellt am ${fmtWhen(a.created_at)}. ` : '');
 
 export default function AdminSecurities() {
   const { A } = useOutletContext();
@@ -156,6 +162,8 @@ export default function AdminSecurities() {
 
   return (
     <div className="admin-areas">
+      <AdminEtf onCreated={bump} />
+
       {!secs || !apps ? (
         <Section title="Werte">{err ? errBox : <SkelRows n={6} />}</Section>
       ) : (
@@ -170,6 +178,7 @@ export default function AdminSecurities() {
             ) : appList.map((a) => (
               <Row
                 key={a.id}
+                className="admin-ipo"
                 title={`${a.name} (${a.ticker})`}
                 sub={`Von ${a.username || 'Unbekannt'}. ${a.description || ''}`}
                 trailing={(
@@ -229,6 +238,12 @@ export default function AdminSecurities() {
             <p className="admin-note">
               {app.name} ({app.ticker}) kommt mit diesem Startpreis in die Werteliste. Danach bestimmt der Handel den Kurs.
             </p>
+            <div className="admin-kv">
+              <div><span>Antrag von</span><strong>{app.username || 'Unbekannt'}</strong></div>
+              <div><span>Gestellt am</span><span>{app.created_at ? fmtWhen(app.created_at) : '–'}</span></div>
+            </div>
+            <p className="admin-note">Text des Antrags</p>
+            <p className="admin-text">{app.description || 'Kein Text beigefügt.'}</p>
             <Field
               label="Startpreis je Aktie (Credits)"
               help="Zu diesem Preis beginnt die Aktie. Der Gründer bekommt 1.000 eigene Aktien."
@@ -286,7 +301,7 @@ export default function AdminSecurities() {
         onClose={close}
         onConfirm={() => reject(app)}
       >
-        {app?.name} ({app?.ticker}) kommt nicht an die Börse. Der Antrag wird geschlossen, das kannst du nicht
+        {whenOf(app || {})}{app?.name} ({app?.ticker}) kommt nicht an die Börse. Der Antrag wird geschlossen, das kannst du nicht
         zurücknehmen.
       </Confirm>
 

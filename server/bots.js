@@ -2,31 +2,45 @@
 // BOT-TRADER — Testspiel-Modus: virtuelle Schüler halten den Markt lebendig.
 // ----------------------------------------------------------------------------
 // Start/Stop über das Admin-Panel (GET/POST /api/admin/bots). Die Bots sind
-// ganz normale Trader-Konten (role='user', is_bot=1): echtes Startkapital und
-// KEIN Anfangsbestand an Aktien — genau wie echte Schüler. Nur manche Bots
+// ganz normale Trader-Konten (role='user', is_bot=1): echtes Startkapital. Neue
+// Bots übernehmen eine STARTPOSITION aus dem Streubesitz der Staatskasse (siehe
+// endowBot): Sie bezahlen sie aus ihrem Startkapital zum aktuellen Kurs, ohne
+// Kurswirkung. So ist der Markt ab der ersten Minute zweiseitig — ohne Startposition
+// waren die ersten 15 Minuten eine reine Kaufphase (84–91 % Kaufanteil), und der
+// Index stieg monoton, bis alle Bots ihre Zielposition gefüllt hatten. Nur manche Bots
 // gründen eine Firma (IPO wie bei Spieler-Anträgen: 1.000 Gründeraktien,
 // Streubesitz kauft die Staatskasse) und halten so Aktien im Depot.
 //
-// Handelsstil ("nahezu random" mit Anlässen):
-//   * Häufigkeit: bot_activity (0-100) steuert die erwarteten Trades je Tick
-//     (activity/100 × 2) — "balanced, ab und zu mal wenige Trades".
-//   * Order-Typ: ~85 % Market-Orders wie echte Schüler, sonst Limits am Spread.
-//   * News/Sentiment: Schlüsselwörter in News (+Dividende/-BaFin) kippen die
-//     Kauf-/Verkaufswahrscheinlichkeit; "heisse" News-Aktien werden bevorzugt.
-//   * Momentum: steigt der Kurs, kaufen die meisten Bots trendfolgend — ein
-//     fester ~20 %-Anteil jeder Bot-Population handelt konträr (Fading).
+// Handelsstil (Entscheidungslogik in botbrain.js, hier nur Markt, Uhr und Ausführung):
+//   * Uhr: je Bot eine eigene Poisson-Uhr in SPIELZEIT. Läutet sie, entscheidet der
+//     Bot aus seinem Depot: unter dem Zielanteil kaufen, darüber verkaufen, sonst
+//     halten. bot_activity (0-100) setzt die Order-Rate der ganzen Population,
+//     handlungsunfähige Bots zählen nicht. Höchstens MAX_ORDERS_TICK Orders je Tick.
+//   * Persona: dauerhaft je Bot (Zielanteil, Cash-Reserve, Disposition, House Money,
+//     Overconfidence, News-Aufmerksamkeit) — siehe botbrain.personaFor.
+//   * News: newsImpact(news) in botbrain bewertet jede Nachricht als Verschiebung
+//     des privaten Werts (in beide Richtungen) und als Aufmerksamkeits-Reiz.
+//   * Fast-Modus (bot_fast): die Spieluhr der Bots läuft ×100. Raten, News-Fenster,
+//     Verfall von Limit-Orders und Bot-Einkommen folgen der Spielzeit — Fast ist
+//     nur schneller, das Kapital läuft nicht schneller leer.
 // Alles läuft über die echte Engine: Escrow, Gebühren, Preis-Band und
-// Self-Trade-Prevention greifen auch für Bots. Fehler (pleite, kein Bestand,
+// Self-Trade-Prevention greifen auch für Bots. Ablehnungen (Pleite, kein Bestand,
 // Lock-up …) werden still verworfen — wie ein Schüler, der es sich anders
-// überlegt.
+// überlegt; gezählt werden sie in status().errors nicht, Order-Rejections in
+// status().skips.
 // ============================================================================
 const crypto = require('crypto');
-const { db, getSettings, setSetting, q, addNews } = require('./db');
+const { db, getSettings, setSetting, q, addNews, fmtDe } = require('./db');
 const bus = require('./bus');
 const engine = require('./engine');
 const auth = require('./auth');
 
-const state = { running: false, timer: null, started_at: null, orders: 0, trades: 0, errors: 0 };
+const state = { running: false, timer: null, started_at: null, runner: null, counters: { orders: 0, trades: 0, errors: 0, skips: {} } };
+
+function tick() {
+  if (state.running && state.runner) return state.runner.tick();
+  return null;
+}
 
 const NEWS_WINDOW_MS = 10 * 60 * 1000;       // so lange wirken News auf die Bots
 const BOT_ORDER_STALE_MS = 10 * 60 * 1000;   // Bot-Limit-Orders verfallen danach
@@ -57,17 +71,93 @@ const BOT_COMPANIES = [
   { name: 'Hausarbeiten-Druck AG', ticker: 'PRINT', description: 'Drucken, Binden, Laminieren — Facharbeit in 10 Minuten.' }
 ];
 
-// News-Stimmung: Wörter, die Schüler optimistisch/pessimistisch stimmen.
-const GOOD_WORDS = ['rekord', 'gewinn', 'gewinne', 'erfolg', 'boom', 'wächst', 'wachstum', 'vertrag',
-  'sieg', 'expansion', 'ausbau', 'festival', 'sommer', 'hitze', 'sonderdividende', 'dividende',
-  'kapitalerhöhung', 'durchbruch', 'beliebt', 'gefragt', 'startet', 'gewinnt', 'preis', 'expandiert', 'ipo'];
-const BAD_WORDS = ['verlust', 'warnung', 'ermittelt', 'ermittlungen', 'bafin', 'skandal', 'rückruf',
-  'einbruch', 'krise', 'desaster', 'pleite', 'insolvenz', 'verbot', 'rückgang', 'minus', 'schwach',
-  'streik', 'unfall', 'brand', 'ausfall', 'kündig'];
-
 // ---------------------------------------------------------------------------
 // Anlegen
 // ---------------------------------------------------------------------------
+const TARGET_BAND = 0.05;           // Breite der Zonen für die Grund-Zähler (why_this_run): über/innerhalb/unter Ziel ± Band
+// Erreichbarer Zielanteil: Der Anteil der Persona, höchstens das, was die Cash-Reserve frei gibt.
+function reachableTarget(p, s) { return Math.max(0.05, Math.min(p.targetShare, 1 - reserveFracOf(p, s))); }
+// Cash-Reserve je Bot: Einstellungen bot_cash_reserve_min/_max, sonst der Persona-Wert.
+function reserveFracOf(p, s) {
+  const lo = Number(s.bot_cash_reserve_min), hi = Number(s.bot_cash_reserve_max);
+  if (Number.isFinite(lo) && Number.isFinite(hi) && hi >= lo && hi >= 0) return lo + (hi - lo) * p.reserveSeed;
+  return p.reserveFrac;
+}
+
+// Startposition eines NEUEN Bots aus dem Streubesitz der Staatskasse — dieselbe
+// Buchung wie ein Kauf von der Staatskasse (addHoldingPublic je Seite, Cash des
+// Bots an die Staatskasse), nur ohne Order und ohne Kurswirkung: Der Bot bezahlt
+// den aktuellen Kurs. Wert = Zielanteil der Persona (höchstens, was die Reserve
+// frei gibt), verteilt auf 2–4 Aktien; der Runner nimmt genau diese Aktien als Korb.
+// Damit der Streubesitz auch für die letzten Bots reicht, bekommt jeder höchstens
+// seinen Anteil am Bestand (85 % / noch erwartete Zugriffe).
+//   picksLeft  Map secId → noch erwartete Zugriffe neuer Bots auf diese Aktie
+// Rückgabe: Anzahl übertragener Stück (0 = keine Börse geladen / nichts frei).
+//   out.picks   die k Aktien des Bots (für den zweiten Durchlauf endowBots)
+//   out.spent   bezahlter Betrag in Cent
+const ENDOW_KEEP_PCT = 15;             // so viel Streubesitz bleibt der Staatskasse mindestens
+function endowBot(user, picksLeft, out = {}, topUp = false) {
+  const t = engine.treasury();
+  if (!t || !engine.books.size) return 0;
+  const p = brain.personaFor(user.username);
+  const s = getSettings();
+  const all = [...engine.books.values()].filter(b => b.sec.type === 'stock' && b.sec.status === 'active' && b.last > 0 && b.sec.founder_id !== user.id);
+  if (!all.length) return 0;
+  const k = Math.min(all.length, 2 + Math.floor(Math.random() * 3));
+  // Bemessung ist das STARTKAPITAL, nicht das Kontoguthaben: Ein Bot-Gründer hält den IPO-Erlös
+  // (z. B. 70.000 Cr) und bekäme sonst das Siebenfache der anderen als Startposition.
+  const budget = Math.floor(Math.min(user.cash, Number(s.start_capital) > 0 ? Number(s.start_capital) : user.cash)
+    * Math.min(p.targetShare, Math.max(0, 1 - reserveFracOf(p, s))));
+  const copy = all.slice();
+  for (let i = copy.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [copy[i], copy[j]] = [copy[j], copy[i]]; }
+  const picked = out.picks || copy.slice(0, k).map(b => b.sec.id);
+  out.picks = picked;
+  const taken = new Map();
+  let spent = 0, shares = 0;
+  // Alles in EINER Transaktion: bricht ein Schritt ab, stehen sonst Aktien ohne Gegenwert.
+  const book = db.transaction(() => {
+  for (const id of picked) {
+    const b = engine.books.get(id);
+    if (!b || b.sec.status !== 'active' || !(b.last > 0)) continue;
+    const free = engine.holdingOf(t.id, b.sec.id);
+    const left = Math.max(1, (picksLeft && picksLeft.get(b.sec.id)) || 1);
+    // erster Durchlauf: gerechter Anteil am Bestand (85 % / noch erwartete Zugriffe);
+    // Top-up: alles, was über den 15-%-Rest hinaus frei ist
+    const fair = Math.floor(free * (100 - ENDOW_KEEP_PCT) / 100 / (topUp ? 1 : left));
+    const wantShares = topUp ? Math.floor((budget - (out.spent || 0)) / picked.length / b.last) : Math.floor(budget / k / b.last);
+    let amount = Math.min(wantShares, fair, free);
+    amount = Math.min(amount, Math.floor((user.cash - spent) / b.last)); // user.cash ist nach dem ersten Durchlauf schon gemindert
+    if (picksLeft && !topUp) picksLeft.set(b.sec.id, left - 1);
+    if (!(amount >= 1)) continue;
+    engine.addHoldingPublic(user.id, b.sec.id, amount, b.last);
+    engine.addHoldingPublic(t.id, b.sec.id, -amount);
+    spent += amount * b.last;
+    shares += amount;
+    taken.set(b.sec.id, (taken.get(b.sec.id) || 0) + amount);
+  }
+  if (!shares) { // alle Zugriffe gingen ins Leere (kein Stück frei): ein Stück von jeder freien Aktie heraussuchen
+    for (const b of copy) {
+      if (taken.size >= k) break;
+      const amount = Math.min(Math.floor(budget / k / b.last), Math.floor(engine.holdingOf(t.id, b.sec.id) * (100 - ENDOW_KEEP_PCT) / 100), Math.floor((user.cash - spent) / b.last));
+      if (!(amount >= 1)) continue;
+      engine.addHoldingPublic(user.id, b.sec.id, amount, b.last);
+      engine.addHoldingPublic(t.id, b.sec.id, -amount);
+      spent += amount * b.last;
+      shares += amount;
+      taken.set(b.sec.id, amount);
+    }
+  }
+  if (!shares) return 0;
+  db.prepare('UPDATE users SET cash = cash - ? WHERE id=?').run(spent, user.id);
+  db.prepare('UPDATE users SET cash = cash + ? WHERE id=?').run(spent, t.id);
+  for (const id of taken.keys()) engine.mmRecenter(engine.books.get(id)); // MM-Leiste mit dem kleineren Bestand
+  });
+  book();
+  out.spent = (out.spent || 0) + spent;
+  user.cash -= spent;
+  return shares;
+}
+
 function ensureBots(count) {
   const have = db.prepare('SELECT COUNT(*) c FROM users WHERE is_bot=1').get().c;
   for (let i = have; i < count; i++) {
@@ -77,6 +167,30 @@ function ensureBots(count) {
     db.prepare('UPDATE users SET is_bot=1 WHERE id=?').run(u.id);
   }
   return db.prepare('SELECT COUNT(*) c FROM users WHERE is_bot=1').get().c;
+}
+
+// Startposition für alle Bots, die noch nie am Markt teilgenommen haben (keine freien
+// Aktien, kein Trade). Auf einer frischen Börse sind das alle; nach einem Neustart des
+// Servers mitten im Spiel niemand. Muss NACH ensureBotCompanies laufen, damit die
+// Aktien der Bot-Firmen mit dabei sind. Rückgabe: Zahl der Bots mit Startposition.
+function endowBots() {
+  const now = Date.now();
+  const fresh = db.prepare(`SELECT u.id, u.username, u.cash FROM users u WHERE u.is_bot=1 AND u.frozen=0
+    AND NOT EXISTS (SELECT 1 FROM holdings h JOIN securities s ON s.id = h.security_id
+                    WHERE h.user_id=u.id AND h.amount>0 AND NOT (s.founder_id = u.id AND s.lockup_until > ${now}))
+    AND NOT EXISTS (SELECT 1 FROM trades t WHERE t.buyer_id=u.id OR t.seller_id=u.id)`).all();
+  if (!fresh.length) return 0;
+  const stocks = [...engine.books.values()].filter(b => b.sec.type === 'stock' && b.sec.status === 'active');
+  // Erwartete Zugriffe auf jede Aktie: Bots × mittlerer Korb (3 Aktien) / Anzahl Aktien
+  const picksLeft = new Map(stocks.map(b => [b.sec.id, Math.max(1, Math.round(fresh.length * 3 / Math.max(1, stocks.length)))]));
+  const outs = new Map();
+  let done = 0;
+  for (const u of fresh) { const o = {}; outs.set(u.id, o); if (endowBot(u, picksLeft, o) > 0) done++; }
+
+  // Zweiter Durchlauf: billigere Aktien liefern je Stück weniger Wert — wer sein Budget noch nicht
+  // angelegt hat, nimmt den Rest über die 15 % hinaus. So kommen die Bots wirklich auf ihr Ziel.
+  for (const u of fresh) { const o = outs.get(u.id); if (o.picks) endowBot(u, null, o, true); }
+  return done;
 }
 
 // Bot-IPO: gleiche Buchung wie /api/admin/ipo/:id/approve (Gründeraktien +
@@ -97,7 +211,7 @@ function listBotCompany(founder, c) {
   db.prepare('UPDATE users SET cash = cash + ? WHERE id=?').run(ipo * floatShares, founder.id);
   db.prepare('UPDATE users SET cash = cash - ? WHERE id=?').run(ipo * floatShares, t.id);
   engine.mmRecenter(engine.books.get(sec.id));
-  const n = addNews('ipo', `IPO: ${sec.name} (${sec.ticker}) startet zum Kurs ${(ipo / 100).toFixed(2)}`,
+  const n = addNews('ipo', `IPO: ${sec.name} (${sec.ticker}) startet zum Kurs ${fmtDe(ipo)}`,
     `${founder.username} hat mit ${sec.name} den Börsengang geschafft! ${founderShares} Gründeraktien (Lock-up), ${floatShares} Stück Streubesitz. Konzept: ${c.description}`, sec.id);
   bus.emit({ type: 'news', news: n });
   bus.emit({ type: 'ticker', ticker: engine.tickerRow(sec.id) });
@@ -119,231 +233,500 @@ function ensureBotCompanies() {
 }
 
 // ---------------------------------------------------------------------------
-// Entscheidungs-Helfer
+// Bot-Runner: eine Bot-Population am Markt. Alles Nötige kommt von außen —
+// Zufall, Uhr, Settings und Marktzugriff — damit Tests einen Bot-Markt
+// deterministisch und ohne Timer fahren können.
 // ---------------------------------------------------------------------------
-// Stabiler Pseudo-Zufall pro Bot-Name: die Persona überlebt Server-Neustarts.
-function personaFor(u) {
-  let h = 0;
-  for (const ch of u.username) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+const brain = require('./botbrain');
+
+// Marktzugriff im Produktionsbetrieb (DB + Engine). Tests übergeben ein eigenes
+// repo oder lassen dieses auf einer eigenen DB laufen.
+function buildRepo() {
   return {
-    contrarian: h % 5 === 0,                     // ~20 % Fading-Trader
-    sizeBias: 0.5 + ((h >>> 3) % 100) / 100      // 0.5 – 1.5 (kleine/large Orders)
+    bots: () => db.prepare("SELECT id, username, cash FROM users WHERE role='user' AND is_bot=1 AND frozen=0").all(),
+    user: (id) => q.userById.get(id),
+    holdings: (id) => db.prepare('SELECT security_id, amount, avg_cost FROM holdings WHERE user_id=? AND amount>0').all(id),
+    securities: () => db.prepare("SELECT id, type, ticker, founder_id, lockup_until FROM securities WHERE status='active'").all(),
+    quote: (secId) => {
+      const b = engine.books.get(secId);
+      return b ? {
+        last: b.last, bid: b.bids[0] ? b.bids[0].price : null, ask: b.asks[0] ? b.asks[0].price : null,
+        bidDepth: engine.sideDepth(b, 'buy'), askDepth: engine.sideDepth(b, 'sell'), // Stück je Seite im Band
+        depth: engine.impactDepth(secId)                                        // Streubesitz D (Ordergrößen-Deckel)
+      } : null;
+    },
+    market: (user, secId, side, amount) => {
+      const p = engine.previewOrder(user, { security_id: secId, side, type: 'market', amount });
+      return { gross: p.gross, available: p.available, cap: p.cap };
+    },
+    tickSize: (secId) => engine.tick(q.secById.get(secId)),
+    place: (user, order) => engine.placeOrder(user, order),
+    // auch marktweite News (security_id NULL) — sie stimmen alle Aktien
+    news: (sinceWallMs) => db.prepare('SELECT kind, title, body, impact, security_id, created_at FROM news WHERE created_at >= ?').all(sinceWallMs),
+    cancelOrder: (userId, orderId) => engine.cancelOrder(q.userById.get(userId), orderId),
+    // liegende Bot-Limit-Orders (Reststück) je Aktie und Seite — zählen weiter gegen den Herding-Deckel
+    openBotLimits: () => db.prepare(`SELECT o.security_id, o.side, o.amount - o.filled AS rest FROM orders o JOIN users u ON u.id=o.user_id
+      WHERE o.status='open' AND o.type='limit' AND u.is_bot=1 AND o.amount > o.filled`).all(),
+    openBotOrdersBefore: (wallMs) => db.prepare(`SELECT o.id, o.user_id FROM orders o JOIN users u ON u.id=o.user_id
+      WHERE o.status='open' AND u.is_bot=1 AND o.created_at < ?`).all(wallMs),
+    pay: (ids, amount) => db.transaction(() => {
+      for (const id of ids) {
+        db.prepare('UPDATE users SET cash = cash + ? WHERE id=?').run(amount, id);
+        bus.emit({ type: 'dirty', user_id: id, what: ['portfolio'] });
+      }
+    })(),
+    // Zahlt der Einkommens-Job selbst (Wanduhr)? Dann lässt der Runner ihm den Vortritt.
+    jobsPayIncome: () => { try { return require('./jobs').state.timers.length > 0; } catch (e) { return false; } }
   };
 }
 
-// Stimmung der letzten News einer Aktie: -3 (seht bearish) .. +3 (sehr bullish)
-function newsSentiment(secId) {
-  const rows = db.prepare('SELECT kind, title, body, created_at FROM news WHERE security_id=? ORDER BY id DESC LIMIT 5').all(secId);
-  const now = Date.now();
-  let score = 0;
-  for (const n of rows) {
-    if (now - n.created_at > NEWS_WINDOW_MS) continue; // alte News wirken nicht mehr
-    const text = `${n.title} ${n.body || ''}`.toLowerCase();
-    let s = 0;
-    for (const w of GOOD_WORDS) if (text.includes(w)) s += 1;
-    for (const w of BAD_WORDS) if (text.includes(w)) s -= 1;
-    if (n.kind === 'dividend') s += 2;   // Ausschüttung mögen Schüler
-    if (n.kind === 'bafin') s -= 2;      // Ermittlungen mögen sie gar nicht
-    if (n.kind === 'ipo') s += 1;        // frisches IPO weckt Neugier
-    score += s;
+const FAST_FACTOR = 100;            // bot_fast: so schnell läuft die Spieluhr der Bots
+const MAX_ORDERS_TICK = 200;        // Engine-Schutz: höchstens so viele Orders je Tick
+const MAX_ATTEMPTS_TICK = 600;      // höchstens so viele Bot-Entscheidungen je Tick (Hold kostet keine Order)
+const NEWS_WINDOW_MIN = 45;         // so lange wirken News am Stück (Spielminuten)
+const ORDER_STALE_MIN = 10;         // Bot-Limit-Orders verfallen danach (Spielminuten)
+const PRICE_MEMORY_MIN = 360;       // Kursgedächtnis für Momentum und Kursband (Spielminuten)
+const PRICE_SAMPLE_SEC = 15;        // Kurspunkte im Gedächtnis: Abstand in Spiel-Sekunden
+const ETF_PICK_PROB = 0.12;         // Anteil der Versuche, die einen ETF statt einer Aktie wählen
+const SIGNAL_GAIN = 1.5;            // wie stark das Gesamtsignal den Zielanteil verschiebt
+const ARRIVAL_MIN = 2;              // Schüler trudeln ein: erster Handel gleichmäßig über 2 Spielminuten (jeder
+                                    // handlungsfähige Bot entscheidet spätestens nach 2 Spielminuten). Bei 10 min
+                                    // handelte im Normalmodus in der ersten Minute fast niemand — Schüler spielen sofort.
+const INVEST_NEW_WEALTH = 0.05;     // so viel von neuem Vermögen (Einkommen, geschenkte Credits) fließt ins Aktienziel …
+const RESERVE_FLOOR = 0.5;         // Cash-Reserve im Nachkauf-Fall: höchstens bis zur Hälfte anzapfen
+const INVEST_GROWTH_CAP = 0.5;      // ... und zwar nur bis +50 % über dem Startvermögen. Danach wird gespart: die
+                                    // Aktienmenge am Markt wächst nicht mit der Geldmenge (Fast-Modus mit
+                                    // income_sec 300 zahlte 100× je Wanduhr: Vermögen ×180, Bots kauften die
+                                    // Staatskasse leer, Index eingefroren, 0 Trades).
+const TICK_FLOW_MAX_STEP = 0.01;     // Netto-Bot-Orderflow je Tick und Aktie: alle Bots zusammen bewegen den
+                                    // fairen Kurs damit um höchstens ~1 % je Tick (Herding-Deckel). Mehr
+                                    // Richtung im selben Tick wird auf den nächsten Tick verschoben.
+const NEWS_EARLY_MIN = 3;            // so lange gilt eine Aktien-News als „frisch“: Wirkung je Bot gedämpft
+const INCOME_CATCHUP_MAX = 100000; // Schutzgrenze der Nachhol-Schleife (bei income_sec ≥ 1 s: jeder Spielzeit)
+const HERD_DEFER_MS = 1000;          // zurückgestellte Order: neuer Versuch innerhalb der nächsten Sekunde (Spielzeit)
+const SETTLE_MIN = 8;                // Anklang: Signale wirken in den ersten Spielminuten nur teilweise (15 % → 100 %) —
+                                    // Staatskasse leer, Index eingefroren, 0 Trades).
+const MIN_NOTIONAL_FEES = 10;       // kleinste Nachschüpfung = 10 × Gebühr (höchstens 10 % der Order); Einstieg ab 1 Stück
+
+// Optionaler Setting-Wert: Key vorhanden → nehmen, sonst Default (db.js braucht nichts zu wissen).
+function opt(s, key, fallback) {
+  const v = Number(s[key]);
+  return Number.isFinite(v) ? v : fallback;
+}
+
+// createBotRunner({ rnd, now, settings, repo, counters, fastFactor })
+//   rnd         () => 0..1, Zufall (Default Math.random)
+//   now         () => Wanduhr-ms (Default Date.now); tick() liest sie je Aufruf
+//   settings    () => Settings (Default getSettings)
+//   repo        Marktzugriff (Default buildRepo())
+//   counters    { orders, trades, errors, skips } — wird fortgeschrieben
+//   fastFactor  Spieluhr-Faktor des Fast-Modus (Default 100); nur Messungen und
+//               Tests setzen ihn kleiner, wenn ihre Uhr bereits komprimiert läuft
+// Rückgabe { tick, attempt, bots, sim, speedUp }:
+//   tick()     ein Bot-Takt: Uhren stellen, Einkommen, verfallene Orders, fällige Bots
+//   attempt(b) EINE Entscheidung eines Bots (b aus bots.values()) → true = Order aufgelegt
+//   bots       Map id -> Bot-Zustand (persona, nextDue, able …)
+//   sim        { t, real, fast, ticks } — Spielzeit t in ms
+function createBotRunner({ rnd = Math.random, now = Date.now, settings = getSettings, repo = buildRepo(), counters, fastFactor = FAST_FACTOR } = {}) {
+  const speedUp = Number.isFinite(fastFactor) && fastFactor > 0 ? fastFactor : FAST_FACTOR;
+  const cnt = counters || { orders: 0, trades: 0, errors: 0, skips: {} };
+  const skip = (k) => { cnt.skips[k] = (cnt.skips[k] || 0) + 1; };
+  const bots = new Map();     // id -> { id, name, persona, store, nextDue, lambda, wealth0, able }
+  const memory = new Map();   // secId -> [{ t, p }] Kursgedächtnis (Spielzeit)
+  const sim = { start: now(), t: now(), real: now(), fast: false, incomeAt: null, ticks: 0 };
+  const view = { secs: [], etfs: [], quotes: new Map(), news: new Map(), newsEarly: new Map(), attention: new Map(), mood: 0 };
+  const flowTick = { n: -1, net: new Map() }; // je Tick: Streubesitz-Nettoflow der Bot-Orders je Aktie (Stück, Kauf + / Verkauf −)
+  const MIN = 60000;
+
+  function sync() {
+    const s = settings();
+    const r = now();
+    sim.t += (r - sim.real) * (sim.fast ? speedUp : 1);
+    sim.real = r;
+    sim.fast = !!s.bot_fast;
+    return s;
   }
-  return Math.max(-3, Math.min(3, score));
-}
+  const simAge = (wallMs) => Math.max(0, (sim.real - wallMs) * (sim.fast ? speedUp : 1)); // Alter in Spiel-ms
+  const wallCutoff = (simMs) => sim.real - simMs / (sim.fast ? speedUp : 1);
 
-// Kurs-Momentum aus der Preis-Historie: -0.6 .. +0.6 (gedämpft — volle
-// Selbstverstärkung erzeugt nur unrealistische Pump-und-Dump-Blasen)
-function momentum(secId) {
-  const rows = db.prepare('SELECT price FROM price_history WHERE security_id=? ORDER BY ts DESC LIMIT 25').all(secId).reverse();
-  if (rows.length < 4 || !rows[0].price) return 0;
-  const chg = rows[rows.length - 1].price / rows[0].price - 1;
-  return Math.max(-0.6, Math.min(0.6, chg * 6));
-}
+  function loadBots() {
+    const have = new Set();
+    for (const u of repo.bots()) {
+      have.add(u.id);
+      if (!bots.has(u.id)) bots.set(u.id, { id: u.id, name: u.username, persona: brain.personaFor(u.username), store: new Map(), universe: null, nextDue: null, lambda: 0, wealth0: 0, able: true });
+    }
+    for (const id of [...bots.keys()]) if (!have.has(id)) bots.delete(id);
+  }
 
-// Wert-Anker: Position des Kurses im Hoch/Tief-Band (0 = am Tief, 1 = am Hoch).
-// Nahe Tief kaufen Bots gern ("Schnäppchen"), nahe Hoch nehmen sie Gewinn mit —
-// das erzeugt natürliche Oszillation statt Endlos-Drift. Im Fast-Mode schrumpft
-// das Fenster mit (Zeitkompression ×100), sonst wäre "24h" dort eine Ewigkeit.
-function valueBias(secId, last) {
-  const winMs = (24 * 3600 * 1000) / (getSettings().bot_fast ? 100 : 1);
-  const r = db.prepare('SELECT MIN(price) lo, MAX(price) hi FROM price_history WHERE security_id=? AND ts>=?').get(secId, Date.now() - winMs);
-  if (!r || !r.lo || !r.hi || r.hi <= r.lo) return 0;
-  const pos = (last - r.lo) / (r.hi - r.lo);
-  if (pos < 0.3) return 0.15;      // tief im Band: Kauf-Reiz
-  if (pos > 0.7) return -0.15;     // hoch im Band: Gewinnmitnahme
-  return 0;
-}
-
-// ---------------------------------------------------------------------------
-// Der eigentliche Handel
-// ---------------------------------------------------------------------------
-function pickSecurity(pool) {
-  // 35 % Chance: eine "heisse" Aktie aus den aktuellen News bevorzugen
-  const hot = db.prepare('SELECT DISTINCT security_id FROM news WHERE created_at >= ? AND security_id IS NOT NULL')
-    .all(Date.now() - NEWS_WINDOW_MS).map(r => r.security_id).filter(id => pool.some(s => s.id === id));
-  if (hot.length && Math.random() < 0.35) return pool.find(s => s.id === hot[(Math.random() * hot.length) | 0]);
-  return pool[(Math.random() * pool.length) | 0];
-}
-
-// Stammdaten je Tick einmal lesen statt je Handelsversuch (der Kontostand wird
-// trotzdem frisch geholt, siehe botAcct).
-const tickCache = { secs: [], bots: [] };
-function loadTickCache() {
-  tickCache.secs = db.prepare("SELECT * FROM securities WHERE status='active'").all();
-  tickCache.bots = db.prepare("SELECT * FROM users WHERE role='user' AND is_bot=1 AND frozen=0").all();
-}
-
-// Ein Versuch. Liefert true, wenn tatsächlich eine Order aufgelegt wurde —
-// stille Skips (pleite, kein Bestand, leeres Buch) liefern false, damit der
-// Tick nachlegen kann und die Ziel-Handelsfrequenz wirklich ankommt.
-function oneTrade() {
-  const secs = tickCache.secs;
-  const stocks = secs.filter(s => s.type === 'stock');
-  const etfs = secs.filter(s => s.type === 'etf');
-  let pool = stocks;
-  if (!pool.length) pool = etfs;
-  else if (etfs.length && Math.random() < 0.12) pool = etfs; // ETFs nur gelegentlich
-  if (!pool.length) return false;
-  let sec = pickSecurity(pool);
-  let book = engine.books.get(sec.id);
-  if (!book) return false;
-
-  const bots = tickCache.bots;
-  if (!bots.length) return false;
-  const bot = bots[(Math.random() * bots.length) | 0];
-  const botAcct = q.userById.get(bot.id); // frischer Cash-Stand (Escrow!)
-
-  // Arbitrage-Instinkt: notiert eine Bid DEUTLICH über dem letzten Kurs (z.B.
-  // AP-Peg-Quotes am NAV oder ein fetter Tipp-Fehler), verkauft der Bot gern
-  // hinein — freies Geld zieht Verkäufer an und zieht Kurse Richtung NAV.
-  if (Math.random() < 0.5) {
-    for (const h of db.prepare('SELECT security_id FROM holdings WHERE user_id=? AND amount>0 ORDER BY RANDOM() LIMIT 4').all(bot.id)) {
-      const b = engine.books.get(h.security_id);
-      if (b && b.bids[0] && b.last && b.bids[0].price > b.last * 1.03) {
-        const amount = Math.min(engine.holdingOf(bot.id, h.security_id), 5 + ((Math.random() * 10) | 0));
-        if (amount >= 1) {
-          try {
-            const r = engine.placeOrder(botAcct, { security_id: h.security_id, side: 'sell', type: 'market', amount });
-            state.orders++;
-            state.trades += r.trades.length;
-            return true;
-          } catch (e) { /* Bid schon weg — normal weiter */ }
-        }
+  // Je Tick einmal: Wertpapiere, Kurse (ins Gedächtnis), News-Wirkung je Wertpapier
+  function loadView() {
+    view.secs = repo.securities();
+    view.etfs = view.secs.filter(x => x.type === 'etf');
+    view.quotes.clear(); view.news.clear(); view.newsEarly.clear(); view.attention.clear(); view.mood = 0;
+    for (const s of view.secs) {
+      const qt = repo.quote(s.id);
+      if (!qt || !qt.last) continue;
+      view.quotes.set(s.id, qt);
+      const arr = memory.get(s.id);
+      if (!arr) memory.set(s.id, [{ t: sim.t, p: qt.last }]);
+      else if (sim.t - arr[arr.length - 1].t >= PRICE_SAMPLE_SEC * 1000) {
+        arr.push({ t: sim.t, p: qt.last });
+        const cut = sim.t - PRICE_MEMORY_MIN * MIN;
+        while (arr.length > 2 && arr[0].t < cut) arr.shift();
       }
+    }
+    const groups = new Map();
+    const fresh = repo.news(wallCutoff(NEWS_WINDOW_MIN * MIN));
+    view.mood = brain.marketMood(fresh, (n) => simAge(n.created_at)); // ohne Aktie: Stimmung für alles
+    for (const n of fresh) {
+      if (n.security_id == null) continue;
+      const g = groups.get(n.security_id);
+      if (g) g.push(n); else groups.set(n.security_id, [n]);
+    }
+    for (const [id, list] of groups) {
+      const sig = brain.newsSignal(list, (n) => simAge(n.created_at));
+      view.news.set(id, sig.value);
+      view.newsEarly.set(id, brain.newsSignal(list.filter(n => simAge(n.created_at) < NEWS_EARLY_MIN * MIN), (n) => simAge(n.created_at)).value);
+      view.attention.set(id, sig.attention);
     }
   }
 
-  const p = personaFor(bot);
-  let buyProb = 0.5 + newsSentiment(sec.id) * 0.12;
-  buyProb += (p.contrarian ? -1 : 1) * momentum(sec.id) * 0.18; // gedämpft: sanftes Trendfolgen
-  buyProb += valueBias(sec.id, book.last);                      // Wert-Anker: Mean Reversion
-  buyProb = Math.min(0.9, Math.max(0.1, buyProb));
-  let side = Math.random() < buyProb ? 'buy' : 'sell';
-
-  let holding = engine.holdingOf(bot.id, sec.id);
-  // Verkaufs-Laune ohne Bestand? Dann verkaufe eine Position, die der Bot WIRKLICH
-  // hält — sonst kann ein frischer Bot-Schwarm anfangs nur kaufen und pumpt den
-  // Markt einseitig in den Himmel, bis sich Bestände verteilt haben.
-  if (side === 'sell' && holding < 1) {
-    const held = db.prepare('SELECT security_id FROM holdings WHERE user_id=? AND amount>0 ORDER BY RANDOM() LIMIT 1').get(bot.id);
-    if (!held) return false;
-    const altBook = engine.books.get(held.security_id);
-    if (!altBook) return false;
-    sec = q.secById.get(held.security_id);
-    book = altBook;
-    holding = engine.holdingOf(bot.id, sec.id);
-    if (sec.founder_id === bot.id && Date.now() < sec.lockup_until) return false; // Lock-up
-  } else if (sec.founder_id === bot.id && Date.now() < sec.lockup_until) holding = 0; // Lock-up gilt auch für Bots
-  // Cash-Pacing: nie mehr als 25% des Cash pro Order (Wale 35%) — Bots bleiben
-  // handlungsfähig, statt sich beim ersten Hype komplett leer zu kaufen.
-  let amount = Math.max(1, Math.round((1 + Math.random() * 10) * p.sizeBias));
-  const whale = Math.random() < 0.07;
-  if (whale) amount = Math.round(amount * (3 + Math.random() * 2)); // Wale: seltene Riesen-Orders fürs Tape
-  const fee = getSettings().fee_cent;
-  const bestBid = book.bids[0]?.price || null;
-  const bestAsk = book.asks[0]?.price || null;
-
-  if (side === 'buy') {
-    const refPrice = bestAsk || book.last || sec.ipo_price;
-    const budget = Math.floor(botAcct.cash * (whale ? 0.35 : 0.25) - fee);
-    const affordable = Math.floor(budget / refPrice);
-    if (affordable < 1) return false; // pleite — kein Trade
-    amount = Math.min(amount, affordable);
-  } else {
-    if (holding < 1) return false;   // nichts zu verkaufen
-    amount = Math.min(amount, holding);
+  // Je Bot ein fester Aktien-Korb (2–4 Werte, aus dem Namens-Hash-Strom gezogen und
+  // dann stabil): ein Schüler beobachtet wenige Aktien, nicht den ganzen Markt.
+  // Gehaltene Werte außerhalb des Korbs bleiben im Blick, bis sie verkauft sind.
+  // Hat der Bot bei der ersten Wahl schon Aktien (Startposition aus endowBot), sind
+  // genau diese sein Korb — sonst hätte er für sie kein Ziel und würde sie sofort wieder verkaufen.
+  function universeOf(b, held = []) {
+    if (!b.universe && held.length) {
+      b.universe = [...new Set(held.map(h => h.security_id))].filter(id => view.quotes.has(id));
+      if (b.universe.length) return b.universe;
+      b.universe = null;
+    }
+    const stocks = view.secs.filter(s => s.type !== 'etf' && view.quotes.has(s.id));
+    const all = stocks.length ? stocks : view.secs.filter(s => view.quotes.has(s.id));
+    if (!all.length) return [];
+    if (!b.universe || !b.universe.some(id => all.some(s => s.id === id))) {
+      const k = Math.min(all.length, 2 + Math.floor(rnd() * 3));
+      const copy = all.map(s => s.id);
+      for (let i = copy.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [copy[i], copy[j]] = [copy[j], copy[i]]; }
+      b.universe = copy.slice(0, k);
+    }
+    return b.universe.filter(id => all.some(s => s.id === id));
   }
 
-  // ~85 % Market-Orders (wie echte Schüler), Rest Limits direkt am Spread
-  let type = 'market', price = null;
-  if (Math.random() > 0.85 && bestBid != null && bestAsk != null) {
-    type = 'limit';
-    const t = engine.tick(sec);
-    price = side === 'buy'
-      ? Math.max(t, bestBid + t * ((Math.random() * 3) | 0))       // rein in den Spread
-      : Math.max(t, bestAsk - t * (1 + ((Math.random() * 2) | 0))); // knapp unter Best Ask
-    if (side === 'buy' && price * amount + fee > botAcct.cash) { type = 'market'; price = null; }
+  // Attention: mit Wahrscheinlichkeit persona.attention ein Wertpapier aus den
+  // aktuellen News (stärkere Wirkung = eher), sonst eines aus dem eigenen Korb
+  // bzw. Depot. Der Index wird EINMAL gezogen — nie innerhalb eines Such-Prädikats.
+  function pickSecurity(b, held) {
+    const hot = [];
+    for (const [id, a] of view.attention) if (a > 0.02 && view.quotes.has(id)) hot.push(id);
+    if (hot.length && rnd() < b.persona.attention) {
+      const w = hot.map(id => 0.2 + Math.abs(view.news.get(id) || 0) * 4);
+      let r = rnd() * w.reduce((x, y) => x + y, 0);
+      for (let i = 0; i < hot.length; i++) { r -= w[i]; if (r <= 0) return hot[i]; }
+      return hot[hot.length - 1];
+    }
+    const etfs = view.etfs.filter(s => view.quotes.has(s.id));
+    if (etfs.length && rnd() < ETF_PICK_PROB) return etfs[Math.min(etfs.length - 1, Math.floor(rnd() * etfs.length))].id;
+    const pool = [...new Set([...universeOf(b), ...held.map(h => h.security_id)])];
+    return pool.length ? pool[Math.min(pool.length - 1, Math.floor(rnd() * pool.length))] : null;
   }
-  if (type === 'market' && side === 'buy' && !bestAsk) return false; // kein Gegengebot im Buch
-  if (type === 'market' && side === 'sell' && !bestBid) return false;
 
-  const r = engine.placeOrder(botAcct, { security_id: sec.id, side, type, price, amount });
-  state.orders++;
-  state.trades += r.trades.length;
-  return true;
-}
-
-// Vergessene Bot-Limit-Orders aufräumen (sonst müllt der Testspiel-Bot das Buch zu)
-function reapStaleBotOrders() {
-  const rows = db.prepare(`SELECT o.id, o.user_id FROM orders o JOIN users u ON u.id=o.user_id
-    WHERE o.status='open' AND u.is_bot=1 AND o.created_at < ?`).all(Date.now() - BOT_ORDER_STALE_MS);
-  for (const r of rows) {
-    try { engine.cancelOrder(q.userById.get(r.user_id), r.id); } catch (e) { /* schon weg */ }
+  // Handelbare Positionen eines Bots: Gründeraktien in der Sperrfrist zählen nicht.
+  function holdingsOf(b) {
+    return repo.holdings(b.id).filter(h => {
+      const s = view.secs.find(x => x.id === h.security_id);
+      return s && !(s.founder_id === b.id && sim.real < s.lockup_until);
+    });
   }
-}
 
-function tick() {
-  if (!state.running) return;
-  let n = 0;
-  try {
-    reapStaleBotOrders();
-    const s = getSettings();
-    if (s.trading_paused) return; // Börse pausiert: auch die Bots halten still
-    loadTickCache();
-    let exp = (s.bot_activity / 100) * 2; // erwartete Trades je Tick
-    if (s.bot_fast) exp *= 100;           // Fast-Mode: Muster-/MM-Tests in Minuten statt Stunden
-    n = Math.min(200, Math.floor(exp)); // Deckel schützt die Engine
-    if (Math.random() < exp - Math.floor(exp)) n = Math.min(200, n + 1);
-  } catch (e) {
-    state.errors++;
-    console.error('[Bots] Tick-Fehler:', e.message);
-    return;
+
+  // Eine Entscheidung des Bots b. true = Order aufgelegt (market oder limit).
+  function attempt(b) {
+    const p = b.persona;
+    const u = repo.user(b.id);
+    if (!u) { b.able = false; return false; }
+    const s = settings();
+    const fee = Number(s.bot_fee_cent) > 0 ? Number(s.bot_fee_cent) : s.fee_cent; // eigene Bot-Gebühr, falls gesetzt (Vertrag V1)
+    const pos = holdingsOf(b);
+    let wealth = u.cash, heldValue = 0;
+    for (const h of pos) { const q2 = view.quotes.get(h.security_id); if (q2) wealth += h.amount * q2.last; }
+    if (!b.wealth0) b.wealth0 = wealth; // normal setzt tick() das Startvermögen schon im ersten Takt
+    let cheapest = Infinity;
+    for (const qt of view.quotes.values()) if (qt.ask || qt.last) cheapest = Math.min(cheapest, qt.ask || qt.last);
+    // Handlungsfähig: kann ein Stück aus dem Cash kaufen oder hat handelbare Aktien
+    b.able = pos.length > 0 || (cheapest !== Infinity && u.cash >= cheapest + fee);
+    if (!b.able || !(wealth > 0)) { skip('unable'); return false; }
+
+    const secId = pickSecurity(b, pos);
+    if (secId == null) { skip('noSecurity'); return false; }
+    const qt = view.quotes.get(secId);
+    const held = pos.find(h => h.security_id === secId);
+    const hist = memory.get(secId) || [];
+    // Anklang: sofort handeln, aber vorsichtig beginnen (verhindert den Umschichtungs-Schub der
+    // Startposition in den ersten zwei Minuten: 602 Trades je 5 min gegen 170 später)
+    const settle = Math.max(0.15, Math.min(1, (sim.t - (b.firstSeen == null ? sim.t - SETTLE_MIN * MIN : b.firstSeen)) / (SETTLE_MIN * MIN)));
+    const signal = settle * brain.valueSignal(p, {
+      priv: brain.privateSignal(b.store, secId, p, sim.t, rnd),
+      // Aktien-News wirken gedämpft und gestaffelt: Ein Bot folgt einer FRISCHEN Meldung nur mit
+      // seinem persona.newsReact (0,2 … 1); die volle Wirkung baut sich auf, während die Meldung
+      // älter wird. Ohne die Staffelung liefen nach einer Nachricht alle Bots im selben Tick in
+      // dieselbe Richtung (gemessen: 4 935 Stück EIS in einer Sekunde, Kursschritt 13,8 %).
+      news: (view.news.get(secId) || 0) - (view.newsEarly.get(secId) || 0) * (1 - (Number.isFinite(p.newsReact) ? p.newsReact : 1)),
+      momentum: brain.momentum(hist.filter(x => x.t >= sim.t - 30 * MIN)),
+      anchor: brain.anchorBias(hist),
+      mood: view.mood,
+      book: brain.bookImbalance(qt)
+    });
+    const korb = universeOf(b, pos);
+    const inKorb = korb.includes(secId);
+    // Ziel je Aktie: fester Anteil des Vermögens, verschoben um das Signal. Werte außerhalb des
+    // eigenen Korbs haben kein Ziel. Unten bei 25 % geklemmt: Ein sehr negatives Signal setzte das
+    // Ziel sonst auf 0. Signale verschieben das Ziel, sie erzwingen keine Seite.
+    const slotShare = inKorb ? p.targetShare * Math.max(0.25, Math.min(1.75, 1 + signal * SIGNAL_GAIN)) / Math.max(1, korb.length) : 0;
+    // Einkommen wird nicht automatisch zu Aktien: Anlagebasis = Startvermögen plus ein kleiner Teil
+    // des neuen Vermögens (INVEST_NEW_WEALTH, höchstens bis INVEST_GROWTH_CAP); Verluste mindern das
+    // Ziel voll. signal hier 0: slotShare trägt das Signal bereits.
+    const gainW = b.wealth0 > 0 ? Math.min(wealth - b.wealth0, b.wealth0 * INVEST_GROWTH_CAP) : 0;
+    const base = wealth > b.wealth0 && gainW > 0 ? b.wealth0 + gainW * INVEST_NEW_WEALTH : wealth;
+    const want = brain.targetValue(p, { wealth: base, slotShare, signal: 0, held: held ? held.amount : 0, price: qt.last, avgCost: held ? held.avg_cost : 0 });
+    if (held) heldValue = held.amount * qt.last;
+    const plan = brain.planTrade(p, { wealth, want, heldValue, refWealth: b.wealth0, rnd });
+    if (plan.side === 'hold') return false;
+    // HINWEIS Zielband-Regel: „netto verkaufen nur über Ziel + Band, kauft nur unter Ziel − Band,
+    // dazwischen umschichten“ wurde am 27.11. erprobt und wieder zurückgenommen (Kaufanteil 43 %,
+    // Index −3,4 % / −7,7 %, Trades im letzten Drittel 30 % statt 50 % des ersten). Belege:
+    // berichte/NACHHER-MESSUNG.md Abschnitt 9. Die Zähler je Grund (countWhy) bleiben.
+
+    let amount;
+    if (plan.side === 'buy') {
+      // Kauf nur aus dem Betrag über der Reserve. Die Reserve ist weich: Wer unter seinem Ziel liegt,
+      // darf sie bis zur Hälfte anzapfen.
+      const under = (() => { let heldAll = 0; for (const h of pos) heldAll += h.amount * (view.quotes.get(h.security_id) || {}).last; return heldAll < 0.97 * base * p.targetShare; })();
+      const spendable = u.cash - Math.round(reserveFracOf(p, s) * wealth * (under ? RESERVE_FLOOR : 1));
+      const ref = qt.ask || qt.last;
+      const gap = want - heldValue;
+      // Nachschöpfen nur, wenn es 10 × Gebühr wert ist — aber nie mehr verlangt als die Zielposition
+      const minNotional = Math.min(MIN_NOTIONAL_FEES * fee, Math.max(1, want));
+      if (gap < minNotional) { skip('tooSmall'); return false; }
+      const mk = repo.market(u, secId, 'buy', 1);
+      amount = brain.sizeOrder({ gapValue: gap, price: ref, size: plan.side === 'buy' && !held ? 1 : plan.size, minChunk: Math.min(want * 0.2, gap) / ref, maxByMoney: (spendable - fee) / ref, limit: mk });
+      while (amount >= 1) { // echte Kosten aus dem Buch, nicht Schätzung am Best Ask
+        const g = repo.market(u, secId, 'buy', amount).gross + fee;
+        if (g <= spendable) break;
+        amount = Math.floor(amount * Math.max(0, spendable) / g);
+      }
+      if (!(amount >= 1)) { skip(spendable < ref + fee ? 'broke' : 'noLiquidity'); return false; }
+    } else {
+      if (!(heldValue > 0)) return false;
+      if (heldValue <= fee) { skip('tooSmall'); return false; } // Erlös kleiner als die Gebühr
+      const mk = repo.market(u, secId, 'sell', 1);
+      // wie beim Kauf höchstens die Abweichung (früher mindestens 20 % der Position)
+      amount = brain.sizeOrder({ gapValue: heldValue - want, price: qt.bid || qt.last, size: plan.size, minChunk: Math.min(heldValue * 0.2, heldValue - want) / (qt.bid || qt.last), maxByMoney: held.amount, limit: mk });
+      if (!(amount >= 1)) { skip('noLiquidity'); return false; }
+    }
+
+    // Per-Bot-Deckel 3 %, Herding-Deckel je Tick und Aktie, Market/Limit — siehe dispatch()
+    if (!dispatch(b, u, secId, plan.side, amount)) return false;
+    countWhy(plan.side, held, qt, pos, base, p, s);
+    return true;
   }
-  // Skips (pleite, leerer Bestand, …) bis zu 3x nachlegen — sonst kommt die
-  // Ziel-Frequenz nie an, weil viele Würfe still verfallen.
-  // Ein Handelsversuch je Event-Loop-Durchlauf: HTTP und WebSocket werden
-  // zwischen den Trades bedient, statt auf einen Bot-Block warten zu müssen.
-  let done = 0, tries = 0;
-  const step = () => {
-    if (!state.running || done >= n || tries++ >= n * 3) return;
-    try { if (oneTrade()) done++; } catch (e) { state.errors++; } // pleite/leeres Buch/… — egal
-    setImmediate(step);
-  };
-  step();
+
+  // Eine Order absetzen: Per-Bot-Deckel 3 %, Herding-Deckel je Tick und Aktie, ~85 % Market / Rest
+  // Limit. silent = ohne Zähler, Verzicht auf Verschieben und Fehlerzählung (derzeit unbenutzt).
+  function dispatch(b, u, secId, side, amount, silent = false) {
+    const qt = view.quotes.get(secId);
+    if (!qt || !(amount >= 1)) return false;
+    const s = settings(), p = b.persona;
+    // Ordergrößen-Deckel: eine Bot-Order bewegt den fairen Kurs um höchstens 3 %. Die Engine-Grenze
+    // begrenzt nur die sofortige Ausführung; der Rest einer Limit-Order liegt im Buch — deshalb
+    // wird hier die ORDER begrenzt.
+    const stepCap = brain.maxStepShares(qt.depth, Number(s.mm_impact_pct));
+    if (stepCap != null) {
+      amount = Math.min(amount, stepCap);
+      if (!(amount >= 1)) { skip('stepCap'); return false; }
+    }
+    // Herding-Deckel: alle Bot-Orders dieses Ticks an der Aktie zusammen bleiben netto unter der
+    // Stückzahl für TICK_FLOW_MAX_STEP Kurswirkung (liegende Bot-Limits zählen mit). Die Order wird
+    // gekürzt; nur ohne Rest verschoben.
+    if (flowTick.n !== sim.ticks) { flowTick.n = sim.ticks; flowTick.net = restingNet(); }
+    const herdCap = brain.maxStepShares(qt.depth, Number(s.mm_impact_pct), TICK_FLOW_MAX_STEP);
+    if (herdCap != null) {
+      const net0 = flowTick.net.get(secId) || 0, dir = side === 'buy' ? 1 : -1;
+      const room = herdCap - dir * net0; // Stück in diese Richtung frei (gegen den Flow: mehr als der Deckel)
+      if (room < 1) {
+        if (!silent) { b.nextDue = Math.min(b.nextDue, sim.t + rnd() * HERD_DEFER_MS); skip('herdCap'); } // später erneut
+        return false;
+      }
+      if (amount > room) { amount = Math.max(1, Math.floor(room)); if (!silent) skip('herdCapTrim'); }
+      flowTick.net.set(secId, net0 + dir * amount);
+    }
+    // ~85 % Market-Orders (wie echte Schüler), Rest Limits knapp am Spread
+    let type = 'market', price = null;
+    if (qt.bid != null && qt.ask != null && rnd() < p.limitAffinity) {
+      const t = repo.tickSize(secId);
+      price = side === 'buy' ? qt.bid + t * (1 + Math.floor(rnd() * 3)) : Math.max(t, qt.ask - t * (1 + Math.floor(rnd() * 3)));
+      type = 'limit';
+    }
+    const order = { security_id: secId, side, type, price, amount };
+    let r;
+    try { r = repo.place(u, order); }
+    catch (e) {
+      if (silent) return false;
+      if (type === 'market') { skip('rejected'); return false; }
+      try { r = repo.place(u, { ...order, type: 'market', price: null }); } // Limit außerhalb des Bands → Market
+      catch (e2) { skip('rejected'); return false; }
+    }
+    cnt.orders++;
+    cnt.trades += r.trades.length;
+    return true;
+  }
+
+  // Zähler je Grund (status().why_this_run): Wo steht der Bot gegenüber seinem erreichbaren
+  // Zielanteil (Zielanteil, höchstens 1 − Reserve), wenn er kauft oder verkauft?
+  function countWhy(side, held, qt, pos, base, p, s) {
+    const why = cnt.why || (cnt.why = {});
+    let heldAll = 0;
+    for (const h of pos) heldAll += h.amount * ((view.quotes.get(h.security_id) || {}).last || 0);
+    const target = reachableTarget(p, s);
+    const zone = heldAll > (target + TARGET_BAND) * base ? 'Over' : heldAll < (target - TARGET_BAND) * base ? 'Under' : 'In';
+    why[side + zone] = (why[side + zone] || 0) + 1;
+    if (side === 'sell' && held && held.avg_cost > 0 && qt.last / held.avg_cost - 1 > (Number.isFinite(p.takeProfit) ? p.takeProfit : brain.DEFAULT_TAKE_PROFIT)) why.sellTakeProfit = (why.sellTakeProfit || 0) + 1;
+  }
+
+  // Netto-Flow der liegenden Bot-Limit-Orders je Aktie (Kauf +, Verkauf −): Sie zählen in jedem
+  // Tick weiter gegen den Herding-Deckel, bis sie gefüllt sind oder verfallen — ihre Füllung in
+  // einem späteren Tick bewegt den Kurs genauso.
+  function restingNet() {
+    const m = new Map();
+    if (typeof repo.openBotLimits !== 'function') return m;
+    for (const o of repo.openBotLimits()) {
+      if (!(o.rest > 0)) continue;
+      m.set(o.security_id, (m.get(o.security_id) || 0) + (o.side === 'buy' ? o.rest : -o.rest));
+    }
+    return m;
+  }
+
+  // Startvermögen je Bot gleich im ersten Takt festhalten — nicht erst beim ersten
+  // Handel (der bis zu ARRIVAL_MIN Minuten später liegt): sonst zählten die bis dahin
+  // eingegangenen Einkommen zum Startvermögen, und die Anlagegrenze wuchs mit dem
+  // Geld, das sie gerade begrenzen soll. Einmal je Bot.
+  function setStartWealth() {
+    for (const b of bots.values()) {
+      if (b.wealth0) continue;
+      const u = repo.user(b.id);
+      if (!u) continue;
+      let w = u.cash;
+      for (const h of repo.holdings(b.id)) w += h.amount * ((view.quotes.get(h.security_id) || {}).last || 0);
+      // Anlagebasis ist das STARTKAPITAL, auch wer im ersten Takt schon mehr hat: Ein Bot-Gründer
+      // erhält den IPO-Erlös (z. B. 70.000 Cr) und kaufte damit stundenlang Aktien nach —
+      // ein Kaufdruck, der mit dem Zielanteil der Persona nichts zu tun hat. Mehr als das
+      // Startkapital gilt als neues Vermögen (davon wird nur ein Teil angelegt).
+      const cap0 = Number(settings().start_capital);
+      if (w > 0) b.wealth0 = cap0 > 0 ? Math.min(w, cap0) : w;
+      if (b.firstSeen == null) b.firstSeen = sim.t;
+    }
+  }
+
+  // Einkommen auf der SPIELUHR: Fast-Modus bekommt es 100× so oft wie der
+  // Wanduhr-Job zahlt. Läuft der Job und ist Spielzeit = Wanduhr, zahlt er selbst.
+  function payIncome(s) {
+    if (!(s.income_sec > 0)) return;
+    // income_sim_scale = 1: der Einkommens-Job skaliert selbst mit der Sim-Zeit.
+    const jobScales = Number(s.income_sim_scale) === 1;
+    const self = !repo.jobsPayIncome() || (sim.fast && speedUp > 1 && !jobScales);
+    // Dieselbe Uhr wie der Einkommens-Job: zählt er im Spielrhythmus (income_sim_scale = 1,
+    // auch ohne laufenden Job), läuft die Bot-Zahlung über die Spielzeit — sonst über die
+    // Wanduhr. (Vorher lief die Selbstzahlung immer über die Spielzeit: Mit
+    // income_sim_scale = 0 bekamen die Schüler eine Zahlung je Stunde Wanduhr, die Bots
+    // aber je 36 s — das Hundertfache.)
+    const useSim = !(sim.fast && !jobScales);
+    const clockNow = useSim ? sim.t : sim.real;
+    const period = s.income_sec * 1000;
+    if (sim.incomeClock !== useSim) { // Uhrwechsel (Fast an/aus): die laufende Periode wird auf der neuen Uhr fortgeführt
+      const wasSim = sim.incomeClock === true;
+      const elapsed = sim.incomeAt == null ? 0 : Math.max(0, (wasSim ? sim.t : sim.real) - sim.incomeAt); // auf der BISHERIGEN Uhr gelesen
+      sim.incomeClock = useSim;
+      sim.incomeAt = sim.incomeAt != null && elapsed > 0 ? clockNow - Math.min(elapsed, period) : null;
+    }
+    if (!self) { sim.incomeAt = clockNow; return; }
+    if (sim.incomeAt == null) { sim.incomeAt = clockNow; return; } // erste Periode ab jetzt
+    // Alle seit dem letzten Takt fälligen Perioden nachholen (langer Takt, Fast-Umstellung, Pause) —
+    // nicht nur eine: bei 60 s Takt und income_sec 360 kamen von 50 fälligen Zahlungen 2 an.
+    let due = 0;
+    while (clockNow - sim.incomeAt >= period && due < INCOME_CATCHUP_MAX) { sim.incomeAt += period; due++; }
+    if (!due) return;
+    const ids = [...bots.keys()];
+    if (ids.length) repo.pay(ids, opt(s, 'bot_income_cent', s.income_cent) * due);
+    for (const b of bots.values()) b.able = true;
+    cnt.income = (cnt.income || 0) + due;
+  }
+
+  // Vergessene Bot-Limit-Orders aufräumen (sonst müllt der Bot das Buch zu)
+  function reapStaleOrders() {
+    for (const o of repo.openBotOrdersBefore(wallCutoff(ORDER_STALE_MIN * MIN))) {
+      try { repo.cancelOrder(o.user_id, o.id); } catch (e) { skip('cancelFailed'); }
+    }
+  }
+
+  function tick() {
+    const s = sync();
+    sim.ticks++;
+    if (s.trading_paused) return { attempts: 0, orders: 0 };
+    loadBots();
+    loadView();
+    setStartWealth();
+    payIncome(s);
+    reapStaleOrders();
+
+    // Poisson-Uhren: Rate je Bot aus Aktivität und Overconfidence; nur
+    // handlungsfähige Bots teilen sich die Zielrate der Population.
+    const base = opt(s, 'bot_trades_per_min', brain.BASE_RATE_PER_MIN);
+    const able = [...bots.values()].filter(b => b.able);
+    const ocSum = able.reduce((a, b) => a + b.persona.overconfidence, 0);
+    const due = [];
+    for (const b of able) {
+      b.lambda = brain.botRatePerMin(b.persona, s.bot_activity, ocSum, base) / MIN;
+      // Gestaffelter Einstieg: jeder Bot kommt zu einem eigenen Zeitpunkt (ARRIVAL_MIN)
+      if (b.nextDue == null) b.nextDue = sim.t + (sim.ticks <= 1 ? rnd() * ARRIVAL_MIN * MIN : 0);
+      if (!Number.isFinite(b.nextDue) && b.lambda > 0) b.nextDue = sim.t;
+      if (b.nextDue <= sim.t) due.push(b);
+    }
+    for (let i = due.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [due[i], due[j]] = [due[j], due[i]]; }
+    let attempts = 0, orders = 0;
+    for (const b of due) {
+      if (orders >= MAX_ORDERS_TICK || attempts >= MAX_ATTEMPTS_TICK) break; // Rest bleibt fällig
+      attempts++;
+      const mean = b.lambda > 0 ? 1 / b.lambda : Infinity;
+      if (mean === Infinity) { b.nextDue = Infinity; continue; }
+      else {
+        b.nextDue = Math.max(b.nextDue, sim.t - mean) + brain.poissonInterval(b.lambda, rnd);
+        if (!(b.nextDue > sim.t)) b.nextDue = sim.t + rnd() * mean;
+      }
+      try { if (attempt(b)) orders++; }
+      catch (e) { cnt.errors++; console.error('[Bots] Entscheidungs-Fehler:', e.message); }
+    }
+    return { attempts, orders, due: due.length, able: able.length };
+  }
+
+  return { tick, attempt, bots, sim, speedUp };
 }
 
 // ---------------------------------------------------------------------------
 // Steuerung (Admin)
 // ---------------------------------------------------------------------------
-function start(silent = false) {
+function start(silent = false, runnerOpts = {}) {
   if (state.running) return status();
   ensureBots(getSettings().bot_count);
   const created = ensureBotCompanies();
+  const endowed = endowBots();
   state.running = true;
   state.started_at = Date.now();
-  state.orders = 0; state.trades = 0; state.errors = 0;
+  state.counters = { orders: 0, trades: 0, errors: 0, skips: {} };
+  state.runner = createBotRunner({ ...runnerOpts, counters: state.counters });
   state.timer = setInterval(tick, Math.max(1, getSettings().bot_tick_sec) * 1000);
   setSetting('bot_running', 1);
-  console.log(`[Bots] Testspiel-Modus gestartet: ${getSettings().bot_count} Bots${created ? `, ${created} neue Bot-Firmen` : ''}.`);
+  console.log(`[Bots] Testspiel-Modus gestartet: ${getSettings().bot_count} Bots${created ? `, ${created} neue Bot-Firmen` : ''}${endowed ? `, ${endowed} Bots mit Startposition` : ''}.`);
   if (!silent) {
     const n = addNews('system', 'Testspiel-Modus aktiviert',
       `Die Investment AG hat ${getSettings().bot_count} virtuelle Trader aktiviert — der Markt ist jetzt auch ohne echte Mitschüler lebendig.`);
@@ -376,12 +759,17 @@ function status() {
     bots: db.prepare('SELECT COUNT(*) c FROM users WHERE is_bot=1').get().c,
     bot_companies: db.prepare(`SELECT s.ticker, s.name FROM securities s JOIN users u ON u.id=s.founder_id
       WHERE u.is_bot=1 AND s.status='active' ORDER BY s.id`).all(),
-    orders_this_run: state.orders,
-    trades_this_run: state.trades,
+    orders_this_run: state.counters.orders,
+    trades_this_run: state.counters.trades,
+    able_bots: state.runner ? [...state.runner.bots.values()].filter(b => b.able).length : null,
+    sim_minutes: state.runner ? Math.round((state.runner.sim.t - state.runner.sim.start) / 60000) : 0,
+    decisions_per_min_target: state.runner ? Math.round(brain.populationRatePerMin(s.bot_activity, opt(s, 'bot_trades_per_min', brain.BASE_RATE_PER_MIN))) : null, // Läuten der Bot-Uhren je Spielminute
+    skips_this_run: { ...state.counters.skips },
+    why_this_run: { ...(state.counters.why || {}) },
     trades_last_hour: db.prepare(`SELECT COUNT(*) c FROM trades WHERE created_at >= ? AND (
       buyer_id IN (SELECT id FROM users WHERE is_bot=1) OR seller_id IN (SELECT id FROM users WHERE is_bot=1))`)
       .get(Date.now() - 3600 * 1000).c,
-    errors: state.errors
+    errors: state.counters.errors
   };
 }
 
@@ -392,7 +780,7 @@ function setActivity(v) {
 
 function setFast(on) {
   setSetting('bot_fast', on ? 1 : 0);
-  console.log(`[Bots] Fast-Mode ${on ? 'AN (×100, Deckel 200/Tick)' : 'aus'}.`);
+  console.log(`[Bots] Fast-Mode ${on ? 'AN (Spieluhr ×100, Deckel 200 Orders/Tick)' : 'aus'}.`);
   return status();
 }
 
@@ -406,4 +794,12 @@ function setTickSec(v) {
   return status();
 }
 
-module.exports = { start, stop, status, setActivity, setFast, setTickSec, ensureBots };
+// Konten und Bot-Firmen anlegen, ohne zu starten (Tests, Admin-Vorbereitung)
+function prepare() {
+  ensureBots(getSettings().bot_count);
+  const created = ensureBotCompanies();
+  endowBots();
+  return created;
+}
+
+module.exports = { start, stop, status, setActivity, setFast, setTickSec, ensureBots, endowBot, endowBots, prepare, tick, createBotRunner, buildRepo };

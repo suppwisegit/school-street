@@ -97,51 +97,137 @@
   font-weight: 700;
 }
 
-/* News: Zeilen ohne Bilder */
-.news-item {
-  padding: 16px var(--ss-gutter);
-  border-bottom: 1px solid var(--ss-line);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.news-meta {
+/* News-Seite: Kopfzeile (Überschrift + „Alle gelesen“), Zeilen-Hülle, Sheet.
+   Die Zeile selbst (Grafik, Metazeile, Schlagzeile) steht in news/news.css. */
+.news-top {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: var(--ss-fs-xs);
-  font-weight: 600;
-  color: var(--ss-text-3);
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0 8px;
 }
 
-.news-item h2 {
+.news-top h1 {
   margin: 0;
+  font-size: var(--ss-fs-lg);
+  font-weight: 700;
+}
+
+/* Hülle je Zeile: nimmt den 600-ms-Hinweis auf, damit die Zeile selbst unverändert bleibt.
+   Sie trägt den negativen Rand der Zeile (Haarlinie rand bis rand), das Blatt bleibt am
+   Seitenrand. Nur per WebSocket eingetroffene Zeilen heben sich hervor: erst surface-2,
+   dann bg, abblendend — die Animation läuft, weil das Element neu ins DOM kommt. */
+.news-line {
+  margin-inline: calc(-1 * var(--ss-gutter));
+}
+
+.news-line.is-new {
+  animation: newsNew 600ms ease-out;
+}
+
+@keyframes newsNew {
+  from { background: var(--ss-surface-2); }
+  to { background: transparent; }
+}
+
+/* Sheet */
+.news-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.news-sheet-title {
+  margin: 8px 0 0;
   font-size: var(--ss-fs-base);
   font-weight: 600;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
-.news-item p {
+.news-sheet-time {
   margin: 0;
-  font-size: var(--ss-fs-sm);
+  font-size: var(--ss-fs-xs);
+  color: var(--ss-text-3);
+}
+
+.news-sheet-text {
+  margin: 4px 0 0;
+  font-size: var(--ss-fs-base);
   line-height: 1.45;
-  color: var(--ss-text-2);
   white-space: pre-line;
+  overflow-wrap: anywhere;
 }
 
-.news-link {
-  color: var(--ss-text);
-  font-weight: 600;
-  text-decoration: none;
-  border-bottom: 1px solid var(--ss-line-strong);
+.news-sheet-quote {
+  margin-top: 8px;
+}
+/* Kürzel und Name klemmen einzeln: ein langer Ticker drängt sonst den Kurs aus dem Blatt. */
+.news-sheet-quote > .row-text {
+  min-width: 0;
 }
 
-.news-link:focus-visible {
-  outline: 2px solid var(--ss-white);
-  outline-offset: 2px;
+.news-sheet-quote .sym {
+  min-width: 0;
+  max-width: 100%;
 }
 
+.news-sheet-quote .sym-tk,
+.news-sheet-quote .sym-nm {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.news-sheet-go {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.news-sheet-fx {
+  margin: 4px 0 0;
+}
+
+.news-sheet-px-chg {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.news-sheet-px {
+  flex: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+/* Zähler am Tab „News“: Wort und Chip stehen nebeneinander, der Chip bleibt sichtbar. */
+.tab-news {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+/* Zahl für die Sprachausgabe: unsichtbar, aber Teil des Tab-Namens */
+.tab-news-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.tab-news-count {
+  min-width: 18px;
+  justify-content: center;
+  padding-inline: 6px;
+}
 
 /* Ab 720 px gehört die Leiste nach oben und klebt beim Scrollen: Sie steht im
    Markup nach dem Inhalt (mobil unten fixiert), hier also davor sortiert. */

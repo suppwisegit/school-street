@@ -84,18 +84,19 @@ export function Sparkline({ values, w = 76, h = 30, fill = true, tone }) {
 
 // ---------------- Linienchart (z. B. Index auf dem Beamer) ----------------
 // points: [{ t, v }] — mit Achsenbeschriftung (Handel: Lehre aus Trading 212).
-export function LineChart({ points, showLabels = true }) {
+// scale vergrößert Schrift, Linie und Achsenrand für den Beamer.
+export function LineChart({ points, showLabels = true, scale = 1 }) {
   const data = useMemo(() => (points || []).filter((p) => p && isFinite(p.v)), [points]);
   const ref = useCanvasDraw((ctx, w, h) => {
     const p = pal();
     if (data.length < 2) {
       ctx.fillStyle = p.text;
-      ctx.font = `600 14px ${p.font}`;
+      ctx.font = `600 ${Math.round(14 * scale)}px ${p.font}`;
       ctx.textAlign = 'center';
       ctx.fillText('Wird aufgebaut …', w / 2, h / 2);
       return;
     }
-    const padR = showLabels ? 84 : 10, padT = 8, padB = 8, padL = 4;
+    const padR = (showLabels ? 84 : 10) * scale, padT = 8 * scale, padB = 8 * scale, padL = 4;
     const plotW = Math.max(1, w - padL - padR), plotH = Math.max(1, h - padT - padB);
     let min = Infinity, max = -Infinity;
     for (const d of data) { min = Math.min(min, d.v); max = Math.max(max, d.v); }
@@ -104,6 +105,7 @@ export function LineChart({ points, showLabels = true }) {
     const col = up ? p.up : p.down;
     const x = (i) => padL + (plotW * i) / (data.length - 1);
     const y = (v) => padT + plotH * (1 - (v - min) / (max - min));
+    const font = (weight, size) => `${weight} ${Math.round(size * scale)}px ${p.font}`;
 
     // Fläche unter der Linie, flach und leise
     ctx.beginPath();
@@ -117,26 +119,31 @@ export function LineChart({ points, showLabels = true }) {
     ctx.beginPath();
     for (let i = 0; i < data.length; i++) { if (i === 0) ctx.moveTo(x(i), y(data[i].v)); else ctx.lineTo(x(i), y(data[i].v)); }
     ctx.strokeStyle = col;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 2 * scale;
     ctx.lineJoin = 'round';
     ctx.stroke();
 
     ctx.beginPath();
-    ctx.arc(x(data.length - 1), y(data[data.length - 1].v), 3, 0, Math.PI * 2);
+    ctx.arc(x(data.length - 1), y(data[data.length - 1].v), 3 * scale, 0, Math.PI * 2);
     ctx.fillStyle = col;
     ctx.fill();
 
     if (showLabels) {
-      const fmt = (v) => v.toLocaleString('de-DE', { maximumFractionDigits: 0 });
+      const fmt = (v) => v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       ctx.textAlign = 'left';
-      ctx.font = `600 12px ${p.font}`;
+      ctx.font = font(600, 12);
       ctx.fillStyle = p.text;
       ctx.fillText(fmt(max), padL + plotW + 8, padT + 12);
       ctx.fillText(fmt(min), padL + plotW + 8, padT + plotH);
       ctx.fillStyle = col;
-      ctx.font = `700 13px ${p.font}`;
-      ctx.fillText(fmt(data[data.length - 1].v), padL + plotW + 8, Math.min(padT + plotH, Math.max(padT + 12, y(data[data.length - 1].v) + 4)));
+      ctx.font = font(700, 13);
+      // Letzter Wert: nie auf die Maximum- oder Minimum-Beschriftung (je 26 px Abstand)
+      ctx.fillText(
+        fmt(data[data.length - 1].v),
+        padL + plotW + 8,
+        Math.min(padT + plotH - 4, Math.max(padT + 28 * scale, y(data[data.length - 1].v) + 4)),
+      );
     }
-  }, [data, showLabels]);
+  }, [data, showLabels, scale]);
   return <canvas ref={ref} />;
 }

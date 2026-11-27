@@ -1,28 +1,177 @@
-// Hintergrund-Jobs: Einkommen, Market-Maker-Refresh, Ghost-Accounts,
-// Preis-Sampler für Charts, Aufräumen alter Zeilen,
+// Hintergrund-Jobs: Einkommen + Gebühren-Recycling, News-Generator, Market-Maker-Refresh,
+// Ghost-Accounts, Preis-Sampler für Charts, Aufräumen alter Zeilen,
 // ETF-Auto-Arbitrage (AP-Automatik, wenn etf_auto=1).
-const { db, getSettings, q, addNews } = require('./db');
+//
+// Spieluhr: Im Fast-Modus (bot_fast) läuft das Spiel mit dem Faktor
+// 100 × income_sim_scale (income_sim_scale = 0: Wanduhr). Einkommen und News folgen dieser
+// Uhr — Fast ist nur schneller, das Kapital läuft nicht schneller leer.
+const { db, getSettings, setSetting, q, addNews, fmtDe } = require('./db');
 const bus = require('./bus');
 const engine = require('./engine');
 const etf = require('./etf');
 
-const state = { last_income: 0, timers: [] };
+const FAST_FACTOR = 100;          // Spieluhr-Faktor des Fast-Modus (wie bots.js)
+const state = { last_income: 0, timers: [], simOrigin: null, simScale: 1, incomeScale: undefined, incomeFirstTick: false };
+// last_income: Beginn der laufenden Zahlungsperiode in Wanduhr-ms. Er rückt je Zahlung um genau ein
+// Intervall weiter (Raster), nie auf „jetzt“ — ein verspäteter Takt verschiebt die folgenden nicht.
 
-function payIncome() {
+// Faktor der Spieluhr gegenüber der Wanduhr (1 = Wanduhr).
+function simScale(s = getSettings()) {
+  const scale = Number(s.income_sim_scale);
+  return s.bot_fast && scale > 0 ? FAST_FACTOR * scale : 1;
+}
+
+// Abstand zweier Einkommenszahlungen in Wanduhr-ms (null = Einkommen ist aus).
+function incomeIntervalMs(s = getSettings()) {
+  const sec = Number(s.income_sec);
+  return sec > 0 ? sec * 1000 / simScale(s) : null;
+}
+
+// Zahlt der Bot-Runner das Einkommen der Bots gerade selbst? Er tut es, wenn dieser Job
+// läuft, Fast an ist und die Spieluhr NICHT hier skaliert (income_sim_scale ≠ 1); sonst
+// bekäme ein Bot das Einkommen doppelt. Dann zahlt dieser Job nur den Spielern das
+// Einkommen; den Pool-Anteil der Bots zahlt er weiter.
+function runnerPaysBots(s) {
+  try { return state.timers.length > 0 && !!s.bot_fast && Number(s.income_sim_scale) !== 1 && require('./bots').status().running; }
+  catch (e) { return false; }
+}
+
+// Einkommen eines Kontos (Bots: wie der Runner, bot_income_cent, falls gesetzt).
+function incomeOf(s, isBot) {
+  const own = Number(s.bot_income_cent);
+  return isBot && own > 0 ? own : s.income_cent;
+}
+
+// Eine Zahlung = EINE Transaktion: Einkommen an alle aktiven Trader und der Gebühren-Pool
+// (fee_recycle_pct % dessen, was chargeFee tatsächlich abgebucht hat) gleichmäßig an alle
+// aktiven Konten, Spieler wie Bots. Der Pool steht in der Datenbank und wird hier bis auf
+// den Rest geleert — ein Abbruch mitten in der Zahlung rollt alles zurück, ein Neustart
+// zahlt nichts doppelt, und es fließt nur zurück, was vorher wirklich abgezogen wurde.
+// nextAnchor: Beginn der nächsten Periode (tickIncome hält damit das Raster); ohne: ab jetzt.
+// botIncome = false: die Bots bekommen nur ihren Pool-Anteil (nach einem Wechsel des Zeitmaßstabs
+// hat der Runner sie womöglich gerade erst gezahlt).
+function payIncome({ nextAnchor, botIncome = true } = {}) {
   const s = getSettings();
-  const users = db.prepare("SELECT id, username FROM users WHERE role='user' AND frozen=0").all();
-  if (!users.length) return;
-  const pay = db.transaction(() => {
-    for (const u of users) {
-      db.prepare('UPDATE users SET cash = cash + ? WHERE id = ?').run(s.income_cent, u.id);
-      bus.emit({ type: 'dirty', user_id: u.id, what: ['portfolio'] });
-    }
-  });
-  pay();
-  state.last_income = Date.now();
+  const skipBots = !botIncome || runnerPaysBots(s);
+  const active = db.prepare("SELECT id, is_bot FROM users WHERE role='user' AND frozen=0").all();
+  if (!active.length) return;
+  // Stand aus der Tabelle (siehe chargeFee: der Cache kann nach einem Rollback vorauseilen).
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'fee_pool_cent'").get();
+  const pool = Math.max(0, Number(JSON.parse(row.value)) || 0);
+  const pct = Math.max(0, Math.min(100, Number(s.fee_recycle_pct) || 0));
+  const share = Math.floor(pool * pct / 100 / active.length);
+  const pays = active.map((u) => ({ id: u.id, amount: (skipBots && u.is_bot ? 0 : incomeOf(s, u.is_bot)) + share }));
+  db.transaction(() => {
+    for (const p of pays) db.prepare('UPDATE users SET cash = cash + ? WHERE id = ?').run(p.amount, p.id);
+    setSetting('fee_pool_cent', pool - share * active.length);
+  })();
+  for (const p of pays) bus.emit({ type: 'dirty', user_id: p.id, what: ['portfolio'] });
+  state.last_income = nextAnchor ?? Date.now();
+  // Die System-News zum Einkommen hat im Spielrhythmus keinen Platz (alle paar Sekunden); sie
+  // erscheint nur, wenn die Zahlungen mindestens eine Minute Wanduhr auseinanderliegen.
+  const interval = incomeIntervalMs(s);
+  if (interval !== null && interval < 60 * 1000) return;
   const n = addNews('system', 'Wocheneinkommen ausgezahlt',
-    `Alle ${users.length} Trader haben ${(s.income_cent / 100).toFixed(0)} Credits erhalten. Viel Erfolg an der School-Street!`);
+    `Die ${active.length} aktiven Trader haben ihr Einkommen erhalten${share > 0 ? ` — je Konto zusätzlich ${fmtDe(share)} Credits aus den zurückgeführten Handelsgebühren` : ''}. Viel Erfolg an der School-Street!`);
   bus.emit({ type: 'news', news: n });
+}
+
+// Spieluhr: Sim-Zeit zu einer Wanduhr, nullpunktfrei seit dem letzten Takt. Wechselt der
+// Faktor zwischen zwei Takten, läuft die angebrochene Zeit noch mit dem alten und erst ab jetzt
+// mit dem neuen — die Sim-Zeit bleibt stetig (kein Sprung, kein Nachholen).
+function simNow(now = Date.now()) {
+  const scale = simScale();
+  const o = state.simOrigin;
+  const sim = o ? o.sim + (now - o.wall) * state.simScale : now; // bis jetzt mit dem Faktor des letzten Takts
+  state.simOrigin = { sim, wall: now };
+  state.simScale = scale;
+  return sim;
+}
+
+// News-Generator (newsgen.js): kein eigener Timer — hier wird einmal je Sekunde nachgeschaut.
+// Fehlt das Modul, wird still übersprungen; jeder andere Fehler beim Laden wird gemeldet.
+let newsgen;
+function loadNewsgen() {
+  if (newsgen !== undefined) return newsgen;
+  try { newsgen = require('./newsgen'); }
+  catch (e) { if (e.code !== 'MODULE_NOT_FOUND') console.error('[Job news] Generator nicht ladbar:', e.message); newsgen = null; }
+  return newsgen;
+}
+// Ein dauerhafter Fehler im Generator würde jede Sekunde ins Log gehen — er steht einmal da,
+// bis ein Takt wieder gelingt.
+let newsFailed = false;
+// Marktbild für den News-Generator (Ereignis-News, E018): je Wertpapier der letzte Kurs und
+// die Tagesänderung gegen den Bezugswert des Tickers, dazu Index und Breite der Aktien —
+// beide über dieselbe Kursänderung gewichtet (Marktkapitalisierung bzw. Anteil der Steigerer).
+// 0…1, keine Angabe möglich: 0. Die Wirkung legt allein newsgen.js fest.
+function marketSnapshot(now = Date.now()) {
+  let mcap = 0, mcapRef = 0, up = 0, stocks = 0;
+  const securities = engine.tickerAll().map((r) => {
+    const row = { id: r.id, ticker: r.ticker, type: r.type, last: r.last, ref: r.ref, chgPct: r.chg };
+    if (r.type === 'stock' && r.ref > 0) {
+      const shares = Number(engine.books.get(r.id)?.sec.total_shares) || 0;
+      mcap += r.last * shares; mcapRef += r.ref * shares;
+      stocks++; if (r.last > r.ref) up++;
+    }
+    return row;
+  });
+  const chg = mcapRef > 0 ? Math.round((mcap / mcapRef - 1) * 10000) / 100 : 0;
+  return { now, sim: simNow(now), securities, indexChgPct: chg, breadth: stocks ? Math.round(up / stocks * 100) / 100 : 0 };
+}
+
+// Übergabe an den Generator: kennt er setMarket, bekommt er das Marktbild vor dem Takt. Ein
+// altes Modul ohne setMarket läuft weiter nur mit der Uhr. Die Signatur legt newsgen.js.
+function feedMarket(gen) {
+  if (typeof gen.setMarket !== 'function') return;
+  try {
+    gen.setMarket(marketSnapshot());
+    marketFailed = false;
+  } catch (e) {
+    if (!marketFailed) console.error('[Job news] Marktbild nicht übergeben (weitere bis zur Erholung still):', e.message);
+    marketFailed = true;
+  }
+}
+let marketFailed = false;
+
+function tickNews() {
+  const gen = loadNewsgen();
+  if (!gen) return;
+  feedMarket(gen);
+  try {
+    gen.once(simNow());
+    newsFailed = false;
+  } catch (e) {
+    // Hier behandeln, NICHT weiterwerfen: safe() würde jeden Fehlschlag erneut melden, einmal je Sekunde.
+    // So steht ein dauerhafter Fehler genau einmal im Log, bis ein Takt wieder gelingt.
+    if (!newsFailed) console.error('[Job news] Fehler (weitere bis zur Erholung still):', e.message);
+    newsFailed = true;
+  }
+}
+
+// Einkommens-Takt (1000 ms). Zahlt höchstens eine Periode je Takt, und der Periodenbeginn rückt je
+// Zahlung um ein Intervall weiter: kein Auseinanderlaufen unter Last und nichts geht verloren —
+// eine verspätet gezahlte Periode wird nachgezahlt, die nächste schon im folgenden Takt.
+function tickIncome() {
+  const now = Date.now();
+  // Die erste Periode beginnt mit dem ersten Takt nach dem Start, nicht schon beim Start selbst: das
+  // Hochfahren (Bots anlegen, Bücher laden) blockiert die Uhr sonst und verkürzt die erste Periode.
+  if (state.incomeFirstTick) { state.incomeFirstTick = false; state.last_income = now; }
+  const interval = incomeIntervalMs();
+  if (interval === null) { state.last_income = now; return; } // 0 = Einkommen ist aus; Einschalten beginnt eine neue Periode
+  const scale = simScale();
+  // Wechsel des Zeitmaßstabs (Fast an/aus, income_sim_scale): stünde sofort eine Zahlung fällig,
+  // beginnt eine neue Periode auf der neuen Uhr. Die Spieler bekommen, was fällig ist (ihr Abstand
+  // zur letzten Zahlung ist bekannt und nicht kürzer als das neue Intervall); die Bots bekommen ihr
+  // Einkommen dann erst nach einer vollen Periode — der Runner hat sie womöglich gerade gezahlt.
+  if (state.incomeScale !== undefined && scale !== state.incomeScale) {
+    state.incomeScale = scale;
+    if (now - state.last_income < interval) return;
+    payIncome({ botIncome: false });
+    return;
+  }
+  state.incomeScale = scale;
+  if (now - state.last_income < interval) return;
+  payIncome({ nextAnchor: state.last_income + interval });
 }
 
 function ghostCleanup() {
@@ -89,8 +238,8 @@ function pruneOrders() {
 
 // Wann kommt das nächste Einkommen? (null = Einkommen ist aus)
 function incomeNextAt() {
-  const sec = getSettings().income_sec;
-  return sec > 0 ? state.last_income + sec * 1000 : null;
+  const interval = incomeIntervalMs();
+  return interval !== null ? state.last_income + interval : null;
 }
 
 // Ein fehlgeschlagener Job darf niemals die ganze Börse mitreißen
@@ -103,11 +252,12 @@ function safe(name, fn) {
 function startJobs() {
   state.last_income = Date.now();
   state.timers.forEach(clearInterval);
+  state.simOrigin = null; // Spieluhr beginnt bei null
+  state.incomeScale = undefined;
+  state.incomeFirstTick = true;
   state.timers = [
-    setInterval(safe('income', () => {
-      const incomeSec = getSettings().income_sec;
-      if (incomeSec > 0 && Date.now() - state.last_income >= incomeSec * 1000) payIncome(); // 0 = Einkommen ist aus
-    }), 1000),
+    setInterval(safe('income', tickIncome), 1000),
+    setInterval(safe('news', tickNews), 1000),
     // MM-Refresh: schneller Loop, aber jedes Buch hat seinen eigenen gestaffelten
     // Takt (mm_refresh_sec ± 30%) — die Bücher wirken lebendig, nicht synchron.
     setInterval(safe('mm-refresh', () => engine.mmRefreshAll()), 3000),
@@ -123,4 +273,10 @@ function startJobs() {
   safe('prune-orders', pruneOrders)();
 }
 
-module.exports = { startJobs, payIncome, ghostCleanup, incomeNextAt, state };
+// Timer anhalten (Neustart der Jobs, Tests); offene Beträge gehen nicht verloren — der Pool steht in der DB.
+function stopJobs() {
+  state.timers.forEach(clearInterval);
+  state.timers = [];
+}
+
+module.exports = { startJobs, stopJobs, payIncome, ghostCleanup, incomeNextAt, incomeIntervalMs, simScale, simNow, marketSnapshot, tickIncome, tickNews, state };

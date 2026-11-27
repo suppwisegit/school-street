@@ -1,11 +1,11 @@
-// Admin, Bereich „Spiel": Pause, Bots, Einkommen, Startkapital, Gebühr.
+// Admin, Bereich „Spiel": Pause, Bots (inkl. Schnellmodus), Einkommen, Startkapital, Gebühr.
 // Jede Einstellung ist eine Zeile mit Hilfesatz; Geld wird in Credits eingegeben.
 // Stand: GET /api/game + GET /api/admin/bots alle 10 s (nur sichtbar) und nach jeder Aktion.
 import React, { useRef, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { credsToCent, dateTimeStr, fmtC } from '../../api.js';
 import {
-  Button, Chip, ErrorBox, Input, Row, Section, Select, SkelRows, Stepper, useToast,
+  Button, Chip, ErrorBox, Input, Row, Section, Segmented, Select, SkelRows, Stepper, useToast,
 } from '../../ui.jsx';
 import { usePoll } from '../../hooks.jsx';
 
@@ -34,6 +34,12 @@ const MONEY = [
     help: 'So viel kostet jeder Kauf und jeder Verkauf. Das Geld ist danach aus dem Spiel.',
     done: (c) => `Gespeichert. Ein Kauf oder Verkauf kostet jetzt ${fmtC(c)} Credits.`,
   },
+];
+
+// Schnellmodus: 0 = aus, 1 = an
+const FAST = [
+  { value: '0', label: 'Aus' },
+  { value: '1', label: 'An' },
 ];
 
 const fmtI = (n) => (Number(n) || 0).toLocaleString('de-DE');
@@ -134,6 +140,15 @@ export default function AdminGame() {
     toast(`Gespeichert. Die Bots handeln jetzt mit ${numOf(r.activity)} von 100.`, 'ok');
   });
 
+  const saveFast = (value) => run('fast', async () => {
+    const r = await A('/api/admin/bots/settings', { method: 'PUT', body: { bot_fast: Number(value) ? 1 : 0 } });
+    lastBots.current = r;
+    setBots(r);
+    toast(r.fast
+      ? 'Gespeichert. Die Bots handeln jetzt hundertmal so oft, ein Schultag dauert wenige Minuten.'
+      : 'Gespeichert. Die Bots handeln wieder im normalen Tempo.', 'ok');
+  });
+
   const saveEvery = (value) => run('every', async () => {
     const r = await A('/api/admin/settings', { method: 'PUT', body: { income_sec: Number(value) } });
     const saved = numOf(r.settings?.income_sec);
@@ -211,6 +226,7 @@ export default function AdminGame() {
 
   const paused = Boolean(game.paused);
   const running = Boolean(bots.running);
+  const fast = bots.fast ? '1' : '0';
   const every = String(numOf(game.income_sec));
   const everyOptions = EVERY.some((o) => o.value === every)
     ? EVERY
@@ -264,6 +280,19 @@ export default function AdminGame() {
                 Speichern
               </Button>
             </div>
+          )}
+        />
+        <Row
+          className="admin-set"
+          title="Schnellmodus"
+          sub="Die Bots handeln hundertmal so oft und ein Schultag passt in wenige Minuten. Gut, um das Marktverhalten von Market Maker und Bots schnell anzusehen."
+          trailing={(
+            <Segmented
+              aria-label="Schnellmodus"
+              value={fast}
+              options={FAST.map((o) => ({ ...o, disabled: blocked }))}
+              onChange={saveFast}
+            />
           )}
         />
       </Section>

@@ -7,7 +7,7 @@ const path = require('path');
 const DBFILE = path.join(__dirname, 'data', process.env.DB_NAME || 'schoolstreet.db');
 for (const f of [DBFILE, DBFILE + '-wal', DBFILE + '-shm']) if (fs.existsSync(f)) fs.unlinkSync(f);
 
-const { db, setSetting, getSettings, q, addNews } = require('./db');
+const { db, setSetting, getSettings, q, addNews, fmtDe } = require('./db');
 const auth = require('./auth');
 const engine = require('./engine');
 const etf = require('./etf');
@@ -50,8 +50,10 @@ for (const [fname, name, ticker, desc, ipo, drift] of founders) {
   db.prepare('UPDATE users SET cash = cash - ? WHERE id=?').run(C(ipo) * FLOAT, treasury.id);
   engine.mmRecenter(engine.books.get(sec.id));
   stocks.push({ sec, drift, founder: u });
-  const n = addNews('ipo', `IPO: ${name} (${ticker}) notiert zum Kurs ${ipo.toFixed(2)}`,
-    `${fname} geht mit ${name} an die Börse. 1.000 Gründeraktien, ${FLOAT} Stück Streubesitz. Konzept: ${desc}`, sec.id);
+  // Startwerte sind mit Spielbeginn notiert, kein Börsengang: `kind='system'`, damit der Client
+  // sie nicht als „neu an der Börse“ markiert (das gilt nur echten IPO-News, client/src/ipo.js).
+  addNews('system', `Startnotierung: ${name} (${ticker}) notiert zum Kurs ${fmtDe(ipo * 100)}`,
+    `${fname} ist mit ${name} an den Start gegangen. 1.000 Gründeraktien, ${FLOAT} Stück Streubesitz. Konzept: ${desc}`, sec.id);
 }
 
 // --- Kursverlauf durch echte Trades erzeugen (MM liefert nur Liquidität) ---

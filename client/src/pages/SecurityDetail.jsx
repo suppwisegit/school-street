@@ -3,24 +3,28 @@
 // gibt es erst nach einer echt ausgeführten Order.
 // Abfragen (Budget V4): Wert beim Öffnen, bei `dirty` und alle 60 s; Kerzen beim
 // Öffnen und beim Umschalten des Zeitraums; Vorschau nur im offenen Sheet.
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import { IconChevronLeft } from '@tabler/icons-react';
 import {
-  Button, Chip, ErrorBox, Field, Input, LivePrice, Money, Num, Pct, Row, Section, Segmented, Sheet, Skel,
+  Button, Chip, Empty, ErrorBox, Field, Input, LivePrice, Money, Num, Pct, Row, Section, Segmented, Sheet, Skel,
   Stepper, confetti, useToast,
 } from '../ui.jsx';
-import { CandleChart, useDirty, useGame, usePoll, useTickerRow } from '../hooks.jsx';
-import { api, credsToCent, fmtC, snapToTick, tickOf } from '../api.js';
+import { CandleChart, LineChart, useDirty, useGame, usePoll, useTickerRow } from '../hooks.jsx';
+import { useSubscribe, useWS } from '../ws.jsx';
+import { api, credsToCent, fmtC, snapToTick, tickOf, timeStr } from '../api.js';
 import './SecurityDetail.css';
+import { NewsMini } from '../news/index.jsx';
 
 const RANGES = [
+  { value: '1h', label: '1S', range: 3600000, bucket: 60000 },
   { value: '1d', label: '1T', range: 86400000, bucket: 300000 },
   { value: '1w', label: '1W', range: 7 * 86400000, bucket: 3600000 },
   { value: '1m', label: '1M', range: 30 * 86400000, bucket: 86400000 },
 ];
 const QUICK = [{ label: '¼', part: 0.25 }, { label: '½', part: 0.5 }, { label: 'Alles', part: 1 }];
 const SIDE_WORD = { buy: 'Kaufen', sell: 'Verkaufen' };
+const CHART_TYPES = [{ value: 'candle', label: 'Kerzen' }, { value: 'line', label: 'Linie' }];
 const REFRESH_MS = 60000;
 const PREVIEW_MS = 300;
 
@@ -31,7 +35,9 @@ function TradeSheet({ open, side, onSide, onClose, sec, last, holding, band, onD
   const [amount, setAmount] = useState(0);
   const [price, setPrice] = useState('');
   const [cash, setCash] = useState(0);
-  const [preview, setPreview] = useState(null);
+  const [preview, setPreview] = useState(null); // letzte Vorschau (bleibt stehen, bis die neue da ist)
+  const [previewFor, setPreviewFor] = useState(null); // Eingabe, zu der die Vorschau gehört
+  const [feeBase, setFeeBase] = useState(0); // Gebühr aus /api/game: damit „Möglich: bis“ nicht springt
   const [error, setError] = useState('');
   const [step, setStep] = useState(0); // 0 = Menge und Vorschau, 1 = Bestätigen
   const [busy, setBusy] = useState(false);
@@ -46,61 +52,67 @@ function TradeSheet({ open, side, onSide, onClose, sec, last, holding, band, onD
     setAmount(0);
     setPrice('');
     setPreview(null);
+    setPreviewFor(null);
     setError('');
     setStep(0);
     setDone(null);
     let alive = true;
     api('/api/portfolio').then((p) => { if (alive) setCash(p.cash); }).catch(() => {});
+    api('/api/game').then((g) => { if (alive) setFeeBase(Number(g.fee_cent) || 0); }).catch(() => {});
     return () => { alive = false; };
   }, [open, side]);
 
   const priceCent = type === 'limit' ? snapToTick(credsToCent(price), sec.type) : null;
   const priceOk = type === 'market' || credsToCent(price) >= tick;
   const inBand = type === 'market' || !band || (priceCent >= band.min && priceCent <= band.max);
-  const fee = preview && Number.isFinite(preview.fee) ? preview.fee : 0;
+  const fee = preview && Number.isFinite(preview.fee) ? preview.fee : feeBase;
   const unit = type === 'limit' ? priceCent : last;
   const max = buy ? (unit > 0 ? Math.floor((cash - fee) / unit) : 0) : holding;
   const tooMany = !buy && amount > holding;
 
-  // Vorschau: nur im offenen Sheet, entprellt, bei jeder Änderung der Eingabe
+  // Vorschau: nur im offenen Sheet, entprellt, bei jeder Änderung der Eingabe.
+  // Die alte Vorschau bleibt sichtbar (abgeblendet), bis die neue da ist — so
+  // ändert das Sheet weder Höhe noch Position, während man die Stückzahl ändert.
+  const inputKey = `${side}|${type}|${amount}|${type === 'limit' ? priceCent : ''}`;
   useEffect(() => {
-    setPreview(null);
-    if (!open || amount < 1 || !priceOk) return undefined;
+    if (!open) return undefined;
+    if (amount < 1 || !priceOk) { setPreview(null); setPreviewFor(null); return undefined; }
     let off = false;
     const timer = setTimeout(async () => {
       try {
         const r = await api(`/api/securities/${sec.id}/preview`, {
           params: { side, type, amount, price: type === 'limit' ? priceCent : undefined },
         });
-        if (!off) { setPreview(r); setError(''); }
+        if (!off) { setPreview(r); setPreviewFor(inputKey); setError(''); }
       } catch (e) {
         if (!off) setError((e && e.message) || 'Das ging nicht.');
       }
     }, PREVIEW_MS);
     return () => { off = true; clearTimeout(timer); };
-  }, [open, side, type, amount, price, sec.id, sec.type, priceOk, priceCent]);
+  }, [open, side, type, amount, price, sec.id, sec.type, priceOk, priceCent, inputKey]);
 
+  const fresh = preview != null && previewFor === inputKey;
   const matched = preview ? preview.matched_qty : 0;
-  const lacks = type === 'market' && preview != null && preview.rest > 0;
+  const lacks = fresh && type === 'market' && preview.rest > 0;
   let total = null;
   if (preview && amount >= 1) {
     total = type === 'market'
-      ? (buy ? preview.gross + fee : preview.gross - fee)
-      : (buy ? priceCent * amount + fee : priceCent * amount - fee);
+      ? (buy ? preview.gross + preview.fee : preview.gross - preview.fee)
+      : (buy ? priceCent * amount + preview.fee : priceCent * amount - preview.fee);
   }
-  const over = buy && total != null && total > cash;
+  const over = fresh && buy && total != null && total > cash;
   const problem = !priceOk
     ? `Preis in Credits, mindestens ${fmtC(tick)}.`
     : !inBand
       ? `Außerhalb des erlaubten Bereichs: ${fmtC(band.min)} bis ${fmtC(band.max)}.`
       : tooMany
         ? `Du hast nur ${holding} Stück.`
-        : lacks
+        : fresh && lacks
           ? `Nur ${matched} Stück verfügbar. Wähl weniger.`
           : over
             ? 'Du hast zu wenig Geld.'
             : '';
-  const ready = amount >= 1 && preview != null && !problem;
+  const ready = fresh && !problem;
 
   const submit = async () => {
     setBusy(true);
@@ -127,7 +139,9 @@ function TradeSheet({ open, side, onSide, onClose, sec, last, holding, band, onD
   const verb = SIDE_WORD[side] || 'Kaufen';
   const tone = buy ? 'buy' : 'sell';
   const totalLabel = buy ? 'Du zahlst' : 'Du erhältst';
-  const totalCell = <span className="num trade-total">{fmtC(Math.max(0, total || 0))}</span>;
+  const totalCell = (
+    <span className="num trade-total">{total != null ? fmtC(Math.max(0, total)) : '–'}</span>
+  );
 
   let body = null;
   let footer = null;
@@ -205,15 +219,15 @@ function TradeSheet({ open, side, onSide, onClose, sec, last, holding, band, onD
             />
           </Field>
         )}
-        {preview && (
-          <div className="trade-preview">
-            <Row title={totalLabel} trailing={totalCell} />
-            <Row title="Stück" trailing={<Num v={type === 'market' ? matched : amount} />} />
-            {preview.avg_price != null && <Row title="Ø-Preis" trailing={<span className="num">{fmtC(preview.avg_price)}</span>} />}
-            <Row title="Gebühr" trailing={<span className="num">{fmtC(preview.fee)}</span>} />
-            {type === 'limit' && <Row title="Wartet im Buch" trailing={<Num v={amount - matched} />} />}
-          </div>
-        )}
+        {/* Die Vorschau hat immer ihren Platz; solange sie zur alten Eingabe gehört,
+            steht sie abgeblendet. So springt das Sheet beim Ändern der Stückzahl nicht. */}
+        <div className={fresh ? 'trade-preview' : 'trade-preview is-stale'}>
+          <Row title={totalLabel} trailing={totalCell} />
+          <Row title="Stück" trailing={<Num v={preview ? (type === 'market' ? matched : amount) : 0} />} />
+          <Row title="Ø-Preis" trailing={<span className="num">{preview && preview.avg_price != null ? fmtC(preview.avg_price) : '–'}</span>} />
+          <Row title="Gebühr" trailing={<span className="num">{preview ? fmtC(preview.fee) : '–'}</span>} />
+          {type === 'limit' && <Row title="Wartet im Buch" trailing={<Num v={preview ? amount - matched : 0} />} />}
+        </div>
         <ErrorBox>{problem || error}</ErrorBox>
       </div>
     );
@@ -250,6 +264,171 @@ function TradeSheet({ open, side, onSide, onClose, sec, last, holding, band, onD
   );
 }
 
+// ---------------------------------------------------------------------------
+// Erweiterte Ansicht (abschaltbar): Kennzahlen, Orderbuch, letzte Trades,
+// Umsatz nach Preis. Die Kurse im Orderbuch kommen live über den WebSocket.
+// ---------------------------------------------------------------------------
+const PRO_KEY = 'schoolstreet.erweitert';
+
+function useProMode() {
+  const [on, setOn] = useState(() => {
+    try { return localStorage.getItem(PRO_KEY) === '1'; } catch { return false; }
+  });
+  const toggle = useCallback(() => {
+    setOn((v) => {
+      const next = !v;
+      try { localStorage.setItem(PRO_KEY, next ? '1' : '0'); } catch { /* ohne Speicher: nur für diese Sitzung */ }
+      return next;
+    });
+  }, []);
+  return [on, toggle];
+}
+
+const dash = (v) => (v === null || v === undefined ? '–' : Number(v).toLocaleString('de-DE'));
+
+function OrderBook({ book }) {
+  const bids = (book && book.bids) || [];
+  const asks = (book && book.asks) || [];
+  if (!bids.length && !asks.length) return <Empty>Das Orderbuch ist leer.</Empty>;
+  const maxQ = Math.max(1, ...bids.map((b) => b[1]), ...asks.map((a) => a[1]));
+  const bestBid = bids.length ? bids[0][0] : null;
+  const bestAsk = asks.length ? asks[0][0] : null;
+  const line = (rows, tone) => {
+    let cum = 0;
+    return rows.map(([p, q], i) => {
+      cum += q;
+      return (
+        <div className="ob-row" key={`${tone}-${p}-${i}`}>
+          <span className={`ob-fill ${tone}`} style={{ width: `${(q / maxQ) * 100}%` }} />
+          <span className={`num ${tone === 'bid' ? 'pos' : 'neg'}`}>{fmtC(p)}</span>
+          <span className="num">{q.toLocaleString('de-DE')}</span>
+          <span className="num muted">{cum.toLocaleString('de-DE')}</span>
+        </div>
+      );
+    });
+  };
+  return (
+    <div>
+      <div className="pro-head">
+        <span>Preis</span><span>Stück</span><span>Tiefe</span>
+      </div>
+      {line([...asks].reverse(), 'ask')}
+      <div className="ob-mid num">
+        {bestBid != null && bestAsk != null
+          ? `Differenz ${fmtC(bestAsk - bestBid)} · Mitte ${fmtC((bestBid + bestAsk) / 2)}`
+          : 'Differenz –'}
+      </div>
+      {line(bids, 'bid')}
+    </div>
+  );
+}
+
+// Letzte Trades: Preis, Stückzahl, Uhrzeit (ohne Namen der Handelspartner).
+function Tape({ tape }) {
+  if (!tape || !tape.length) return <Empty>Noch keine Trades.</Empty>;
+  return (
+    <div>
+      {tape.slice(0, 20).map((t, i) => (
+        <div className="tp-row" key={t.id ?? `${t.ts}-${i}`}>
+          <span className="num tp-price">{fmtC(t.price)}</span>
+          <span className="num muted">×{t.amount.toLocaleString('de-DE')}</span>
+          <span className="num muted small">{timeStr(t.created_at || t.ts)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Gehandelte Stückzahl je Preisstufe; grün über der Mitte, rot darunter.
+function VolumeProfile({ tape, mid }) {
+  const levels = useMemo(() => {
+    const m = new Map();
+    for (const t of tape || []) m.set(t.price, (m.get(t.price) || 0) + t.amount);
+    return [...m.entries()].sort((a, b) => b[0] - a[0]).slice(0, 14);
+  }, [tape]);
+  if (!levels.length) return <Empty>Noch keine Umsätze.</Empty>;
+  const maxQ = Math.max(...levels.map((l) => l[1]));
+  return (
+    <div>
+      {levels.map(([p, q]) => {
+        const above = mid != null && p >= mid;
+        return (
+          <div className="vp-row" key={p}>
+            <span className={`num ${above ? 'pos' : 'neg'}`}>{fmtC(p)}</span>
+            <span className="vp-bar">
+              <span className={`vp-fill ${above ? 'bid' : 'ask'}`} style={{ width: `${(q / maxQ) * 100}%` }} />
+            </span>
+            <span className="num">{q.toLocaleString('de-DE')}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ProPanel({ secId, info }) {
+  const [book, setBook] = useState(null);
+  const [tape, setTape] = useState(null);
+
+  // Beim Öffnen und nach jedem Neuladen: Stand vom Server
+  useEffect(() => {
+    setBook((info && info.book) || null);
+    setTape((info && info.tape) || null);
+  }, [info]);
+
+  // Orderbuch und Trades live
+  useSubscribe(secId);
+  useWS((m) => {
+    if (!m || m.security_id !== secId) return;
+    if (m.type === 'book') setBook(m.book);
+    else if (m.type === 'trade') setTape((t) => [m, ...(t || [])].slice(0, 40));
+  });
+
+  const stats = (info && info.stats) || {};
+  const sec = (info && info.security) || {};
+  const pct = new Intl.NumberFormat('de-DE', { maximumFractionDigits: 2 });
+  const items = [
+    ['Volumen (24 h)', dash(stats.vol24)],
+    ['Umsatz (24 h)', stats.turnover24 ? fmtC(stats.turnover24) : '–'],
+    ['Trades (24 h)', dash(stats.trades24)],
+    ['Ø-Preis (24 h)', stats.vwap24 != null ? fmtC(stats.vwap24) : '–'],
+    ['Differenz Geld/Brief', stats.spread != null ? `${fmtC(stats.spread)} (${pct.format(stats.spread_bp)} bp)` : '–'],
+    ['Kauforders im Buch', dash(stats.bid_depth)],
+    ['Verkauforders im Buch', dash(stats.ask_depth)],
+    ['Wert aller Stücke', stats.mcap ? fmtC(stats.mcap) : '–'],
+    ['Stück im Umlauf', sec.total_shares ? Number(sec.total_shares).toLocaleString('de-DE') : '–'],
+    ['Schwankung', stats.volatility_pct != null ? `${pct.format(stats.volatility_pct)} %` : '–'],
+  ];
+
+  return (
+    <>
+      <Section title="Kennzahlen">
+        <div className="pro-grid">
+          {items.map(([label, value]) => (
+            <div className="pro-item" key={label}>
+              <span className="muted">{label}</span>
+              <span className="num">{value}</span>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      <div className="pro-cols">
+        <Section title="Orderbuch">
+          <OrderBook book={book} />
+        </Section>
+        <Section title="Letzte Trades">
+          <Tape tape={tape} />
+        </Section>
+      </div>
+
+      <Section title="Umsatz nach Preis">
+        <VolumeProfile tape={tape} mid={stats.mid} />
+      </Section>
+    </>
+  );
+}
+
 export default function SecurityDetail() {
   const { id } = useParams();
   const secId = Number(id);
@@ -261,8 +440,10 @@ export default function SecurityDetail() {
   const [info, setInfo] = useState(null);
   const [failed, setFailed] = useState(false);
   const [range, setRange] = useState('1d');
+  const [chartType, setChartType] = useState('candle');
   const [candles, setCandles] = useState([]);
   const [sheet, setSheet] = useState(null); // 'buy' | 'sell' | null
+  const [pro, togglePro] = useProMode(); // Erweiterte Ansicht (Kennzahlen, Orderbuch, Trades)
   const alive = useRef(true);
 
   useEffect(() => {
@@ -297,6 +478,8 @@ export default function SecurityDetail() {
   usePoll(() => { loadInfo(); loadCandles(); }, REFRESH_MS, [loadInfo, loadCandles]);
 
   const afterTrade = useCallback(() => { bump(); loadInfo(); }, [bump, loadInfo]);
+  // Linienchart: Schlusskurs je Kerze
+  const linePoints = useMemo(() => candles.map((c) => ({ t: c.t, v: c.c })), [candles]);
 
   const cancel = useCallback(async (orderId) => {
     try {
@@ -346,13 +529,23 @@ export default function SecurityDetail() {
       </header>
 
       <div className="trade-chart">
-        <Segmented
-          value={range}
-          onChange={setRange}
-          options={RANGES.map(({ value, label }) => ({ value, label }))}
-          aria-label="Zeitraum"
-        />
-        <div className="trade-canvas"><CandleChart candles={candles} /></div>
+        <div className="trade-chart-tools">
+          <Segmented
+            value={range}
+            onChange={setRange}
+            options={RANGES.map(({ value, label }) => ({ value, label }))}
+            aria-label="Zeitraum"
+          />
+          <Segmented
+            value={chartType}
+            onChange={setChartType}
+            options={CHART_TYPES}
+            aria-label="Darstellung des Charts"
+          />
+        </div>
+        <div className="trade-canvas">
+          {chartType === 'line' ? <LineChart points={linePoints} /> : <CandleChart candles={candles} />}
+        </div>
       </div>
 
       <Section>
@@ -366,7 +559,18 @@ export default function SecurityDetail() {
           sub={holding > 0 ? `gekauft zu ${fmtC(mine.avg_cost)} · ${pnl >= 0 ? '+' : '−'}${fmtC(Math.abs(pnl))}` : undefined}
           trailing={holding > 0 ? <Money c={holding * last} className="num" /> : <span className="muted">–</span>}
         />
+        <Row
+          onClick={togglePro}
+          aria-pressed={pro}
+          title="Erweiterte Ansicht"
+          sub="Kennzahlen, Orderbuch und letzte Trades"
+          trailing={<span className={`num ${pro ? 'pos' : 'muted'}`}>{pro ? 'An' : 'Aus'}</span>}
+        />
       </Section>
+
+      <NewsMini limit={3} securityId={secId} />
+
+      {pro && <ProPanel secId={secId} info={info} />}
 
       {open.length > 0 && (
         <Section title="Offene Orders">

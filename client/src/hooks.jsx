@@ -5,6 +5,7 @@
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import { api } from './api.js';
 import { addFeed, useWS } from './ws.jsx';
+import { newsPush } from './newsStore.js';
 
 export { Sparkline, LineChart } from './charts.jsx';
 
@@ -61,6 +62,7 @@ const subTicker = (fn) => { ticker.listeners.add(fn); return () => { ticker.list
 // Der Speicher wird unabhängig von sichtbaren Seiten gespeist: immer aktiv, nicht
 // erst, wenn eine Seite `useTicker` aufruft.
 addFeed(onTicker);
+addFeed(newsPush); // neue News einmal für den gemeinsamen Vorrat (newsStore.js)
 
 // Zeile außerhalb von React (z. B. beim Filtern einer Liste): gleicher Typ wie useTickerRow.
 export const getTickerRow = (id) => ticker.rows.get(id) || null;
@@ -79,7 +81,9 @@ export function useTickerRow(id) {
 // ---------------------------------------------------------------------------
 // Spielzustand (Pause)
 // ---------------------------------------------------------------------------
-const game = { paused: false, ready: false, listeners: new Set(), version: 0 };
+// ipoHighlightSec: wie lange ein Börsengang als „neu“ gilt (Sekunden, Wanduhr) — öffentlich aus
+// GET /api/game; null, solange der Server es nicht geschickt hat.
+const game = { paused: false, ready: false, ipoHighlightSec: null, listeners: new Set(), version: 0 };
 let lastGameMsg = null;
 let gameFetched = false;
 
@@ -108,11 +112,21 @@ export function useGame() {
     if (gameFetched) return;
     gameFetched = true;
     api('/api/game')
-      .then((g) => { if (g && typeof g.paused === 'boolean') onGame({ type: 'game', game: { paused: g.paused } }); })
+      .then((g) => {
+        if (g && typeof g.paused === 'boolean') onGame({ type: 'game', game: { paused: g.paused } });
+        const sec = Number(g && g.ipo_highlight_sec);
+        if (g && Number.isFinite(sec) && sec !== game.ipoHighlightSec) { game.ipoHighlightSec = sec; game.version++; for (const l of game.listeners) l(); }
+      })
       .catch(() => { /* Endpunkt (noch) nicht da — WebSocket meldet den Zustand */ });
   }, []);
   const version = useSyncExternalStore(subGame, () => game.version);
   return useMemo(() => ({ paused: game.paused, ready: game.ready }), [version]);
+}
+
+// ipo_highlight_sec aus GET /api/game (null = noch nicht geladen oder der Server kennt es nicht).
+export function useIpoHighlightSec() {
+  useSyncExternalStore(subGame, () => game.ipoHighlightSec);
+  return game.ipoHighlightSec;
 }
 
 // ---------------------------------------------------------------------------

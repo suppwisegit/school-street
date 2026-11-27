@@ -56,11 +56,13 @@ const WebSocket = require('ws');
 
 const ROOT = path.resolve(__dirname, '..');          // hier liegt loadtest.js: Bericht und node_modules
 const REPORT_DIR = path.join(ROOT, '.agent-team', 'berichte');
-const USAGE = 'Aufruf: node server/loadtest.js [--clients 300] [--seconds 20] [--bots 100] [--label baseline] [--port 3199] [--seed 1] [--root <Verzeichnis>]';
+const USAGE = 'Aufruf: node server/loadtest.js [--clients 300] [--seconds 20] [--bots 100] [--fast 0|1] [--label baseline] [--port 3199] [--seed 1] [--root <Verzeichnis>]';
 let SRV_DIR = __dirname;                             // getesteter Server: <root>/server (Schalter --root bzw. SS_ROOT)
 let DATA_DIR = path.join(SRV_DIR, 'data');           // sein data-Verzeichnis (die DB dort wird nie geöffnet)
 let WATCH_DIRS = [DATA_DIR];                         // data-Verzeichnisse, deren DB-Dateien vor/nach verglichen werden
-const TICK = { stock: 100, etf: 10 };     // client/src/api.js: tickOf()
+const TICK = { stock: 100, etf: 10 };     // Preisschritt der Last-Orders. Aktien laufen seit MM V3 auf 10 Cent
+                                           // (client/src/api.js: tickOf); 100 bleibt gültig und hält das
+                                           // Orderprofil gleich zur Baseline-Messung (Vergleichbarkeit).
 const USER_PW = 'lasttest-passwort';      // nur für die Wegwerf-Konten in der Temp-DB
 const REQUEST_TIMEOUT_MS = 30000;
 const SOCKET_IDLE_MS = 2500;              // unter dem KeepAliveTimeout des Servers (Node: 5 s), siehe RetiringAgent
@@ -101,7 +103,7 @@ const expDist = (rnd, mean) => -Math.log(1 - rnd()) * mean;
 
 // ---------- Aufruf ----------
 function parseArgs(argv) {
-  const o = { clients: 300, seconds: 20, bots: 100, label: 'baseline', port: 3199, seed: 1, root: path.resolve(process.env.SS_ROOT || ROOT), rootSet: !!process.env.SS_ROOT };
+  const o = { clients: 300, seconds: 20, bots: 100, fast: null, label: 'baseline', port: 3199, seed: 1, root: path.resolve(process.env.SS_ROOT || ROOT), rootSet: !!process.env.SS_ROOT };
   const int = (name, v, min, max) => {
     const n = Number(v);
     if (!Number.isInteger(n) || n < min || n > max) throw new Error(`--${name}: ganze Zahl ${min}..${max} erwartet (erhalten: ${v})`);
@@ -115,6 +117,7 @@ function parseArgs(argv) {
     if (m[1] === 'clients') o.clients = int('clients', v, 1, 10000);
     else if (m[1] === 'seconds') o.seconds = int('seconds', v, 1, 3600);
     else if (m[1] === 'bots') o.bots = int('bots', v, 0, 10000);
+    else if (m[1] === 'fast') o.fast = int('fast', v, 0, 1);
     else if (m[1] === 'port') o.port = int('port', v, 1024, 65535);
     else if (m[1] === 'seed') o.seed = int('seed', v, 0, 2147483647);
     else if (m[1] === 'root') { o.root = path.resolve(v); o.rootSet = true; }
@@ -387,6 +390,11 @@ async function setupWorld(opts) {
   adminToken = login.json.token;
   const st = (await admin('GET', '/admin/settings')).json.settings;
   // bot_count bewusst NICHT setzen: die Zahl der Bots regelt der Server selbst.
+  // --fast 0|1: Schnellmodus der Bots vor dem Start setzen (ohne Schalter: was der Server eingestellt hat).
+  if (opts.fast !== null) {
+    const f = await admin('PUT', '/admin/bots/settings', { bot_fast: !!opts.fast });
+    if (f.status !== 200) throw new Error(`bot_fast ${opts.fast} lässt sich nicht setzen: HTTP ${f.status} ${f.json && f.json.error}`);
+  }
   const started = await admin('POST', '/admin/bots/start', {});
   const b = started.json || {};
   if (started.status !== 200 || !b.running) throw new Error(`Bots lassen sich nicht starten: HTTP ${started.status} ${b.error}`);
@@ -781,8 +789,9 @@ async function measureWindow(opts) {
   res.botErrors = bt1.errors;
   res.usersTotal = ov1.counts.users;
   // Fällt die Zahlung des Wocheneinkommens ins Fenster, laden alle Nutzer gleichzeitig ihre Daten neu
-  const lastIncome = res.wall1 + ov1.next_income_in - world.incomeSec * 1000;
-  res.incomeInWindow = lastIncome >= res.wall0 - 1500 && lastIncome <= res.wall1 + 1500;
+  // next_income_in: Restzeit in ms bis zur Zahlung (bereits mit Sim-Uhr-Faktor) oder null bei income_sec = 0.
+  const rest = ov1.next_income_in;
+  res.incomeInWindow = rest !== null && rest <= 1500;
   log(`Fenster beendet nach ${((t1 - t0) / 1000).toFixed(2)} s, ${res.unanswered} Anfragen ohne Antwort`);
 }
 
@@ -907,6 +916,7 @@ function buildReport(opts, r) {
     ['Datum (UTC)', new Date().toISOString().slice(0, 19)],
     ['Aufruf', `\`${r.cmd}\``],
     ['Getesteter Server', `\`${opts.root}\` — git HEAD ${gitHead(opts.root)}, sha256 über ${r.code.files.length} Dateien server/*.js (ohne Lasttest/Seed/Smoke) = ${r.code.hash}`],
+    ['Schnellmodus der Bots', opts.fast === null ? 'vom Server eingestellt (--fast nicht gesetzt)' : `--fast ${opts.fast}`],
     ['Zufalls-Samen', `${opts.seed} — nur für den Lastgenerator; Bot- und Market-Maker-Zufall bleiben serverseitig`],
     ['Umgebung', `Node ${process.version}, ${os.platform()} ${os.release()}, ${os.cpus()[0].model.trim()}, ${os.cpus().length} Kerne, ${(os.totalmem() / 2 ** 30).toFixed(1)} GiB RAM`],
     ['Systemlast 1/5/15 min', `vor Start ${r.load0.map((x) => x.toFixed(2)).join(' / ')}, nach Lauf ${r.load1.map((x) => x.toFixed(2)).join(' / ')} (andere Prozesse desselben Rechners eingerechnet)`],

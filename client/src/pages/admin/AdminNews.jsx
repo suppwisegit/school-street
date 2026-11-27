@@ -19,6 +19,9 @@ export default function AdminNews() {
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [secId, setSecId] = useState('');
+  // Art und Kurswirkung: der Server nimmt news | rumor | bafin | dividend und impact −3…3 (routes.js).
+  const [kind, setKind] = useState('news');
+  const [impact, setImpact] = useState('0');
   const [formErr, setFormErr] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -40,17 +43,21 @@ export default function AdminNews() {
     e.preventDefault();
     const t = title.trim();
     if (t.length < 3) { setFormErr('Der Titel braucht mindestens 3 Zeichen.'); return; }
+    const wirkung = Number(impact);
+    if (!Number.isInteger(wirkung) || wirkung < -3 || wirkung > 3) { setFormErr('Die Kurswirkung muss zwischen −3 und +3 liegen.'); return; }
     setFormErr('');
     setBusy(true);
     try {
       await A('/api/admin/news', {
         method: 'POST',
-        body: { title: t, body: body.trim(), kind: 'news', security_id: secId ? Number(secId) : null },
+        body: { title: t, body: body.trim(), kind, security_id: secId ? Number(secId) : null, impact: wirkung },
       });
       toast(`Veröffentlicht: ${t}`, 'ok');
       setTitle('');
       setBody('');
       setSecId('');
+      setKind('news');
+      setImpact('0');
       bump();
     } catch (er) {
       setFormErr(er.message);
@@ -92,6 +99,29 @@ export default function AdminNews() {
               {secs.map((s) => <option key={s.id} value={s.id}>{s.ticker} · {s.name}</option>)}
             </Select>
           </Field>
+          <Field label="Art" help="Gerüchte sind unbestätigt und tragen ein eigenes Etikett." htmlFor="news-kind">
+            <Select id="news-kind" value={kind} onChange={(e) => setKind(e.target.value)}>
+              <option value="news">Nachricht</option>
+              <option value="rumor">Gerücht</option>
+              <option value="bafin">BaFin-Hinweis</option>
+              <option value="dividend">Dividende</option>
+            </Select>
+          </Field>
+          <Field
+            label="Kurswirkung"
+            help={kind === 'rumor' ? 'Bei einem Gerücht würfelt der Server das Vorzeichen.' : 'Wie stark der Kurs des Werts auf die News reagieren soll.'}
+            htmlFor="news-impact"
+          >
+            <Select id="news-impact" value={impact} onChange={(e) => setImpact(e.target.value)}>
+              <option value="0">Ohne Wirkung</option>
+              <option value="1">Leicht positiv</option>
+              <option value="2">Positiv</option>
+              <option value="3">Stark positiv</option>
+              <option value="-1">Leicht negativ</option>
+              <option value="-2">Negativ</option>
+              <option value="-3">Stark negativ</option>
+            </Select>
+          </Field>
           <Button type="submit" loading={busy} disabled={!title.trim()}>Veröffentlichen</Button>
         </form>
       </Section>
@@ -104,8 +134,8 @@ export default function AdminNews() {
             <Row
               key={n.id}
               title={n.title}
-              sub={[dateTimeStr(n.created_at), n.body].filter(Boolean).join(' · ')}
-              trailing={n.security_id ? <Chip>{tickerOf(n.security_id)}</Chip> : undefined}
+              sub={[dateTimeStr(n.created_at), n.kind === 'rumor' ? 'Gerücht' : '', n.impact ? `Wirkung ${n.impact > 0 ? '+' : ''}${n.impact}` : '', n.body].filter(Boolean).join(' · ')}
+              trailing={n.security_id ? <Chip tone={n.kind === 'rumor' ? 'warn' : 'neutral'}>{n.kind === 'rumor' ? 'Gerücht · ' : ''}{tickerOf(n.security_id)}</Chip> : n.kind === 'rumor' ? <Chip tone="warn">Gerücht</Chip> : undefined}
             />
           ))
         )}

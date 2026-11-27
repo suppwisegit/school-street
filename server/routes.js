@@ -1,6 +1,6 @@
 // Alle REST-Routen: Auth, Markt/Handel, Unternehmen, Board (öffentlich), Admin (AG).
 const express = require('express');
-const { db, getSettings, setSetting, q, addNews } = require('./db');
+const { db, getSettings, setSetting, q, addNews, fmtDe, fmtDeInt } = require('./db');
 const bus = require('./bus');
 const engine = require('./engine');
 const etf = require('./etf');
@@ -23,7 +23,7 @@ router.post('/auth/register', (req, res) => {
   if (q.userByName.get(name)) return res.status(409).json({ error: 'Username vergeben' });
   const u = auth.createUser(name, password, 'user', getSettings().start_capital);
   const token = auth.createSession(u.id);
-  const n = addNews('system', `🆕 Neuer Trader: ${name}`, `${name} hat ein Depot eröffnet und ${(getSettings().start_capital / 100).toFixed(0)} Credits Startkapital erhalten.`);
+  const n = addNews('system', `Neuer Trader: ${name}`, `${name} hat ein Depot eröffnet und ${fmtDeInt(getSettings().start_capital)} Credits Startkapital erhalten.`);
   bus.emit({ type: 'news', news: n });
   res.json({ token, user: pubUser(u) });
 });
@@ -92,7 +92,33 @@ router.get('/securities/:id/candles', (req, res) => {
   res.json({ candles: [...buckets.values()] });
 });
 
-router.get('/news', (req, res) => res.json({ news: q.newsAll.all(Math.min(100, Number(req.query.limit) || 40)) }));
+// Arten aus dem Schema (db.js, Tabelle news). `?kind=` filtert darauf, Komma-Liste erlaubt;
+// leer oder fehlend = kein Filter; eine unbekannte Art wird abgelehnt statt still ignoriert.
+const NEWS_KINDS = ['news', 'rumor', 'dividend', 'bafin', 'ipo', 'system', 'takeover', 'etf'];
+// `?security_id=<id>` filtert auf einen Wert (ganzzahlig, sonst 400) und ist mit `?kind=` kombinierbar.
+const newsFiltered = {};
+router.get('/news', (req, res) => {
+  const kinds = String(req.query.kind ?? '').split(',').map((k) => k.trim().toLowerCase()).filter(Boolean);
+  const bad = kinds.find((k) => !NEWS_KINDS.includes(k));
+  if (bad) return res.status(400).json({ error: `kind: unbekannte Art „${bad}“. Erlaubt: ${NEWS_KINDS.join(', ')}` });
+  let securityId = null;
+  if (req.query.security_id !== undefined && req.query.security_id !== '') {
+    const raw = String(req.query.security_id).trim();
+    if (!/^\d+$/.test(raw)) return res.status(400).json({ error: 'security_id: eine ganze Zahl (ID des Werts) erwartet.' });
+    securityId = Number(raw);
+  }
+  const limit = Math.min(100, Number(req.query.limit) || 40);
+  const unique = [...new Set(kinds)];
+  if (!unique.length && securityId === null) return res.json({ news: q.newsAll.all(limit) });
+  const key = `${unique.join(',')}|${securityId === null ? '' : securityId}`;
+  const st = newsFiltered[key] || (newsFiltered[key] = db.prepare(
+    `SELECT * FROM news WHERE ${[
+      ...(unique.length ? [`kind IN (${unique.map(() => '?').join(',')})`] : []),
+      ...(securityId === null ? [] : ['security_id = ?']),
+    ].join(' AND ')} ORDER BY id DESC LIMIT ?`,
+  ));
+  res.json({ news: st.all(...unique, ...(securityId === null ? [] : [securityId]), limit) });
+});
 
 // =========================== HANDEL (auth) ===========================
 router.post('/orders', auth.requireAuth, (req, res) => {
@@ -134,16 +160,23 @@ router.get('/portfolio', auth.requireAuth, (req, res) => {
   });
 });
 
+// Vermögen aller Spieler (ohne Bots): Cash + Bestände zum aktuellen Kurs. Zwei Abfragen für
+// alle statt eine je Nutzer (Rangliste, Board, Desk). Kurse ohne Buch zählen wie vorher nicht.
+function playerWorths() {
+  const worth = new Map();
+  for (const u of db.prepare("SELECT id, cash FROM users WHERE role='user' AND is_bot=0").all()) worth.set(u.id, u.cash);
+  for (const h of db.prepare("SELECT h.user_id, h.security_id, h.amount FROM holdings h JOIN users u ON u.id=h.user_id WHERE u.role='user' AND u.is_bot=0").all()) {
+    const b = engine.books.get(h.security_id);
+    if (b) worth.set(h.user_id, worth.get(h.user_id) + h.amount * b.last);
+  }
+  return worth;
+}
+
 router.get('/leaderboard', (req, res) => {
   const users = db.prepare("SELECT * FROM users WHERE role='user' AND is_bot=0").all();
-  const rows = users.map(u => {
-    let worth = u.cash;
-    for (const h of db.prepare('SELECT * FROM holdings WHERE user_id=?').all(u.id)) {
-      const b = engine.books.get(h.security_id);
-      if (b) worth += h.amount * b.last;
-    }
-    return { id: u.id, username: u.username, worth, realized_pl: u.realized_pl, frozen: !!u.frozen };
-  }).sort((a, b) => b.worth - a.worth);
+  const worth = playerWorths();
+  const rows = users.map(u => ({ id: u.id, username: u.username, worth: worth.get(u.id), realized_pl: u.realized_pl, frozen: !!u.frozen }))
+    .sort((a, b) => b.worth - a.worth);
   const rankOf = (id) => { const i = rows.findIndex(r => r.id === id); return i === -1 ? null : i + 1; };
   res.json({ leaderboard: rows.slice(0, 20).map((r, i) => ({ ...r, rank: i + 1 })), my_rank: req.user ? rankOf(req.user.id) : null });
 });
@@ -273,14 +306,9 @@ router.get('/board', (req, res) => {
   const withChg = tick.filter(t => t.type === 'stock' || t.type === 'etf');
   const sorted = [...withChg].sort((a, b) => b.chg - a.chg);
   const withSpark = (t) => ({ ...t, spark: sparkFor(t.id) });
-  const lb = db.prepare("SELECT * FROM users WHERE role='user' AND is_bot=0").all().map(u => {
-    let worth = u.cash;
-    for (const h of db.prepare('SELECT * FROM holdings WHERE user_id=?').all(u.id)) {
-      const b = engine.books.get(h.security_id);
-      if (b) worth += h.amount * b.last;
-    }
-    return { username: u.username, worth };
-  }).sort((a, b) => b.worth - a.worth).slice(0, 10);
+  const worth = playerWorths();
+  const lb = db.prepare("SELECT id, username FROM users WHERE role='user' AND is_bot=0").all()
+    .map(u => ({ username: u.username, worth: worth.get(u.id) })).sort((a, b) => b.worth - a.worth).slice(0, 10);
 
   res.json({
     index, index_history: points,
@@ -313,14 +341,9 @@ router.get('/desk', (req, res) => {
   const tot = db.prepare('SELECT COUNT(*) n, SUM(amount) vol, SUM(price*amount) turnover FROM trades WHERE created_at>=?').get(day);
   const advancers = securities.filter(s => s.type === 'stock' && s.chg > 0).length;
   const decliners = securities.filter(s => s.type === 'stock' && s.chg < 0).length;
-  const lb = db.prepare("SELECT * FROM users WHERE role='user' AND is_bot=0").all().map(u => {
-    let worth = u.cash;
-    for (const h of db.prepare('SELECT * FROM holdings WHERE user_id=?').all(u.id)) {
-      const b = engine.books.get(h.security_id);
-      if (b) worth += h.amount * b.last;
-    }
-    return { username: u.username, worth };
-  }).sort((a, b) => b.worth - a.worth).slice(0, 10);
+  const worth = playerWorths();
+  const lb = db.prepare("SELECT id, username FROM users WHERE role='user' AND is_bot=0").all()
+    .map(u => ({ username: u.username, worth: worth.get(u.id) })).sort((a, b) => b.worth - a.worth).slice(0, 10);
 
   res.json({
     index, index_history: points,
@@ -347,9 +370,13 @@ function adminOverview() {
     fees_burned: db.prepare("SELECT COUNT(*) c FROM orders WHERE fee_charged=1 AND is_mm=0").get().c * getSettings().fee_cent
   };
   const treasuryPositions = t ? db.prepare(`SELECT h.*, s.ticker FROM holdings h JOIN securities s ON s.id=h.security_id WHERE h.user_id=?`).all(t.id) : [];
-  return { treasury: { cash: t ? t.cash : 0, positions: treasuryPositions }, counts, next_income_in: Math.max(0, jobsState.last_income + getSettings().income_sec * 1000 - Date.now()) };
+  return { treasury: { cash: t ? t.cash : 0, positions: treasuryPositions }, counts, next_income_in: nextIncomeIn() };
 }
-let jobsState = jobs.state; // für "nächstes Einkommen in"-Anzeige
+// Bis zur nächsten Einkommenszahlung in ms (mit Spieluhr-Faktor); null = Einkommen ist aus.
+function nextIncomeIn() {
+  const at = jobs.incomeNextAt();
+  return at === null ? null : Math.max(0, at - Date.now());
+}
 
 router.get('/admin/overview', auth.requireAdmin, (req, res) => res.json(adminOverview()));
 
@@ -357,14 +384,41 @@ router.get('/admin/settings', auth.requireAdmin, (req, res) => res.json({ settin
 router.put('/admin/settings', auth.requireAdmin, (req, res) => {
   const allowed = ['fee_cent', 'income_cent', 'income_sec', 'start_capital', 'inactivity_sec', 'lockup_sec',
     'treasury_capital',
-    'mm_spread_bp', 'mm_size', 'mm_levels', 'mm_size_step', 'mm_step_bp', 'mm_refresh_sec', 'mm_fee_exempt',
-    'mm_cash_budget_pct', 'mm_noise_bp', 'mm_jitter_bp', 'mm_size_jitter', 'mm_inv_target_pct', 'mm_inv_skew_bp',
-    'mm_guard_pct', 'mm_guard_widen', 'mm_replenish_min', 'mm_replenish_qty', 'mm_replenish_price_mult',
-    'mm_recap_min_pct', 'mm_recap_to_pct', 'mm_vol_ref', 'mm_vol_mult_max',
-    'etf_auto', 'etf_auto_threshold_pct', 'etf_auto_units', 'etf_auto_interval_sec', 'etf_auto_max_units',
+    'mm_impact_pct', 'mm_spread_bp', 'mm_size', 'mm_levels', 'mm_size_step', 'mm_refresh_sec', 'mm_fee_exempt',
+    'mm_cash_budget_pct', 'mm_jitter_bp', 'mm_size_jitter', 'mm_replenish_min', 'mm_replenish_pct',
+    'mm_recap_min_pct',
+    'etf_auto', 'etf_ap_inventory_pct', 'etf_auto_interval_sec', 'etf_auto_max_units',
     'bot_count', 'bot_activity', 'bot_tick_sec', 'bot_fast',
-    'limit_band_pct', 'limit_band_cents', 'cap_hours_needed'];
-  for (const [k, v] of Object.entries(req.body || {})) if (allowed.includes(k)) setSetting(k, Number(v));
+    'limit_band_pct', 'cap_hours_needed',
+    'news_interval_sec', 'bot_cash_reserve_min', 'bot_cash_reserve_max', 'bot_fee_cent', 'fee_recycle_pct',
+    'income_sim_scale', 'mm_min_ask_shares', 'mm_min_depth', 'ipo_highlight_sec'];
+  // Prüfung vor dem ersten Schreibzugriff: ein ungültiger Wert lehnt die ganze Anfrage ab, damit nichts Halbes steht.
+  // Jeder Schlüssel: endliche Zahl ≥ 0; Schalter nur 0/1 (ganzzahlig), Anteile bis 1, Prozente bis 100.
+  // Einordnung nach dem Default: 0.9 / 0.05 sind Anteile, 50 / 100 sind Prozente.
+  // Nicht mehr vorhandene Admin-Schlüssel: eine alte Admin-Seite darf nicht glauben, sie hätte gesetzt.
+  const ENTFERNT = ['etf_autobuy'];
+  const SCHALTER = ['bot_fast', 'etf_auto', 'mm_fee_exempt', 'income_sim_scale'];       // nur 0 oder 1 (1 = Sim-Zeit, 0 = Wanduhr)
+  const ANTEIL = ['bot_cash_reserve_min', 'bot_cash_reserve_max', 'mm_cash_budget_pct', 'mm_recap_min_pct', 'mm_size_jitter']; // 0…1
+  const PROZENT = ['mm_impact_pct', 'mm_replenish_pct', 'etf_ap_inventory_pct', 'fee_recycle_pct', 'bot_activity'];           // 0…100
+  const GANZZAHL = ['fee_cent', 'income_cent', 'bot_count', 'news_interval_sec', 'bot_fee_cent', 'fee_recycle_pct',
+    'mm_min_ask_shares', 'mm_min_depth', 'ipo_highlight_sec', ...SCHALTER];
+  const grenzen = (k) => (SCHALTER.includes(k) || ANTEIL.includes(k) ? [0, 1] : PROZENT.includes(k) ? [0, 100] : [0, Infinity]);
+  const entfernt = Object.keys(req.body || {}).find((k) => ENTFERNT.includes(k));
+  if (entfernt) return res.status(400).json({ error: `${entfernt} ist keine Einstellung mehr.` });
+  const werte = Object.entries(req.body || {}).filter(([k]) => allowed.includes(k));
+  for (const [k, v] of werte) {
+    const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
+    const [von, bis] = grenzen(k);
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < von || n > bis || (GANZZAHL.includes(k) && !Number.isInteger(n))) {
+      return res.status(400).json({ error: `${k}: ${GANZZAHL.includes(k) ? 'ganze Zahl' : 'Zahl'} zwischen ${von} und ${bis === Infinity ? 'unbegrenzt' : bis} erwartet.` });
+    }
+  }
+  if (werte.some(([k]) => k === 'bot_cash_reserve_min') || werte.some(([k]) => k === 'bot_cash_reserve_max')) {
+    const min = Number(Object.fromEntries(werte).bot_cash_reserve_min ?? getSettings().bot_cash_reserve_min);
+    const max = Number(Object.fromEntries(werte).bot_cash_reserve_max ?? getSettings().bot_cash_reserve_max);
+    if (min > max) return res.status(400).json({ error: 'bot_cash_reserve_min darf nicht größer als bot_cash_reserve_max sein.' });
+  }
+  for (const [k, v] of werte) setSetting(k, typeof v === 'string' ? Number(v) : v);
   res.json({ settings: getSettings() });
 });
 router.post('/admin/income/now', auth.requireAdmin, (req, res) => { jobs.payIncome(); res.json(adminOverview()); });
@@ -379,10 +433,17 @@ router.post('/admin/ipo/:id/approve', auth.requireAdmin, (req, res) => {
   if (!app || app.status !== 'pending') return res.status(404).json({ error: 'Antrag nicht offen' });
   if (q.secByTicker.get(app.ticker)) return res.status(409).json({ error: 'Ticker inzwischen vergeben' });
   const ipo = Math.round(Number(req.body?.ipo_price) * 100);
-  const founderShares = Math.floor(Number(req.body?.founder_shares) || 1000);
-  const floatShares = Math.floor(Number(req.body?.float_shares) ?? 2000);
+  // Stückzahlen: fehlen sie ganz, gelten die Defaults des Admin-Dialogs (1000 Gründeraktien, 2000 Streubesitz).
+  // Ein vorhandener, aber unleserlicher Wert („abc“) darf nicht NaN bleiben — das landete als NULL in
+  // securities.total_shares und endete als 500. (`NaN ?? 2000` bleibt NaN.) Unleserlich → sauberes 400.
+  const shares = (v, def) => (v === undefined || v === null || (typeof v === 'string' && v.trim() === '') ? def : Number(v));
+  const founderShares = Math.floor(shares(req.body?.founder_shares, 1000));
+  const floatShares = Math.floor(shares(req.body?.float_shares, 2000));
   const thresholdMult = Number(req.body?.threshold_mult) || 1.5;
-  if (!(ipo > 0) || founderShares < 1 || floatShares < 0) return res.status(400).json({ error: 'Ungültige Parameter' });
+  if (!Number.isFinite(ipo) || !(ipo > 0)) return res.status(400).json({ error: 'Ungültige Parameter' });
+  if (!Number.isInteger(founderShares) || founderShares < 1 || !Number.isInteger(floatShares) || floatShares < 0) {
+    return res.status(400).json({ error: 'Gründeraktien und Streubesitz angeben: Stückzahlen müssen ganze Zahlen sein (Gründeraktien mindestens 1, Streubesitz mindestens 0).' });
+  }
   const founder = q.userById.get(app.user_id);
   if (!founder) return res.status(404).json({ error: 'Gründer gelöscht' });
   const sec = engine.listSecurity({ type: 'stock', ticker: app.ticker, name: app.name, description: app.description, founder_id: founder.id, ipo_price: ipo, total_shares: founderShares + floatShares });
@@ -400,7 +461,7 @@ router.post('/admin/ipo/:id/approve', auth.requireAdmin, (req, res) => {
   }
   db.prepare('UPDATE ipo_applications SET status=?, decided_at=? WHERE id=?').run('approved', Date.now(), app.id);
   engine.mmRecenter(engine.books.get(sec.id));
-  const n = addNews('ipo', `IPO: ${sec.name} (${sec.ticker}) startet zum Kurs ${(ipo / 100).toFixed(2)}`,
+  const n = addNews('ipo', `IPO: ${sec.name} (${sec.ticker}) startet zum Kurs ${fmtDe(ipo)}`,
     `${founder.username} hat mit ${sec.name} den Börsengang geschafft! ${founderShares} Gründeraktien (2 Wochen Lock-up), ${floatShares} Stück Streubesitz. Konzept: ${app.description}`, sec.id);
   bus.emit({ type: 'news', news: n });
   bus.emit({ type: 'ticker', ticker: engine.tickerRow(sec.id) });
@@ -429,7 +490,7 @@ router.post('/admin/requests/:id/decide', auth.requireAdmin, (req, res) => {
     engine.books.get(sec.id).sec.threshold_price = Math.round(engine.books.get(sec.id).last * 1.5);
     engine.addHoldingPublic(sec.founder_id, sec.id, newShares);
     const n = addNews('news', `Kapitalerhöhung: ${sec.name} (${sec.ticker})`,
-      `Die Investment AG hat die Kapitalerhöhung genehmigt: +${newShares} neue Aktien (20%) für den Gründer ${q.userById.get(sec.founder_id)?.username}. Neue Kurs-Schwelle: ${(engine.books.get(sec.id).last * 1.5 / 100).toFixed(2)}.`, sec.id);
+      `Die Investment AG hat die Kapitalerhöhung genehmigt: +${newShares} neue Aktien (20%) für den Gründer ${q.userById.get(sec.founder_id)?.username}. Neue Kurs-Schwelle: ${fmtDe(engine.books.get(sec.id).last * 1.5)}.`, sec.id);
     bus.emit({ type: 'news', news: n });
     bus.emit({ type: 'dirty', user_id: sec.founder_id, what: ['portfolio'] });
   }
@@ -442,9 +503,14 @@ router.post('/admin/requests/:id/decide', auth.requireAdmin, (req, res) => {
 
 // ---- News ----
 router.post('/admin/news', auth.requireAdmin, (req, res) => {
-  const { title, body, security_id, kind } = req.body || {};
+  const { title, body, security_id, kind, impact } = req.body || {};
   if (!title || String(title).trim().length < 3) return res.status(400).json({ error: 'Titel zu kurz' });
-  const n = addNews(['news', 'bafin', 'dividend'].includes(kind) ? kind : 'news', String(title).trim(), String(body || ''), security_id || null);
+  // Wirkung: ganze Zahl -3…+3; fehlt sie, ist sie 0. Keine Bruchzahl, kein Text, kein Wert außerhalb —
+  // die Bots rechnen mit ihr, ein geratener Ersatz wäre eine falsche Marktwirkung.
+  if (impact !== undefined && impact !== null && !(typeof impact === 'number' && Number.isInteger(impact) && impact >= -3 && impact <= 3)) {
+    return res.status(400).json({ error: 'impact: ganze Zahl zwischen -3 und 3 erwartet' });
+  }
+  const n = addNews(['news', 'bafin', 'dividend', 'rumor'].includes(kind) ? kind : 'news', String(title).trim(), String(body || ''), security_id || null, impact ?? 0);
   bus.emit({ type: 'news', news: n });
   res.json({ ok: true, news: n });
 });
@@ -463,8 +529,8 @@ function payDividend(secId, perShare, reason) {
   db.prepare('INSERT INTO dividends(security_id, per_share, total, created_at) VALUES(?,?,?,?)').run(secId, perShare, total, Date.now());
   const t = engine.treasury();
   db.prepare('UPDATE users SET cash = cash - ? WHERE id=?').run(total, t.id); // Staatskasse zahlt
-  const n = addNews('dividend', `Dividende: ${sec.name} (${sec.ticker}) schüttet ${(perShare / 100).toFixed(2)} je Aktie`,
-    `${reason ? reason + '. ' : ''}Insgesamt ${(total / 100).toFixed(2)} Credits an ${holders.length} Aktionäre. Achtung ETF-Anleger: auch der Korb wurde bedient.`, secId);
+  const n = addNews('dividend', `Dividende: ${sec.name} (${sec.ticker}) schüttet ${fmtDe(perShare)} je Aktie`,
+    `${reason ? reason + '. ' : ''}Insgesamt ${fmtDe(total)} Credits an ${holders.length} Aktionäre. Achtung ETF-Anleger: auch der Korb wurde bedient.`, secId);
   bus.emit({ type: 'news', news: n });
   const routed = etf.routeDividend(secId, perShare);
   return { total, holders: holders.length, routed };
@@ -532,20 +598,51 @@ router.get('/admin/etf', auth.requireAdmin, (req, res) => {
   });
 });
 router.post('/admin/etf/create-fund', auth.requireAdmin, (req, res) => {
+  // Vertrag V6: legt den ETF an, ohne Aktien zu kaufen — die Staatskasse muss den Korb
+  // für initial_units im Depot haben (etf.js createEtf prüft und meldet die Fehlmenge).
+  // Textfelder: null/fehlt = leer; alles andere als String (Zahl, Objekt, Liste) wird abgelehnt
+  const text = (value) => {
+    if (value == null) return '';
+    if (typeof value !== 'string') throw new etf.EtfError('Name, Kürzel und Beschreibung müssen Text sein.');
+    return value.trim();
+  };
   try {
-    const { ticker, name, shares_per_unit, basket, initial_units } = req.body || {};
-    const tick = String(ticker || '').toUpperCase();
-    if (!/^[A-Z]{3,6}$/.test(tick)) return res.status(400).json({ error: 'Ticker: 3-6 Buchstaben' });
-    if (q.secByTicker.get(tick)) return res.status(409).json({ error: 'Ticker vergeben' });
-    const spu = Math.floor(Number(shares_per_unit));
-    const units = Math.floor(Number(initial_units));
-    if (!(spu >= 1) || !(units >= 1)) return res.status(400).json({ error: 'Ungültige Multiplikator/Units' });
-    const b = (basket || []).filter(x => Number(x.qty) > 0 && Number(x.stock_id) > 0)
-      .map(x => ({ stock_id: Number(x.stock_id), qty: Math.floor(Number(x.qty)) }));
-    if (!b.length) return res.status(400).json({ error: 'Korb leer' });
-    const sec = etf.createEtf({ ticker: tick, name: String(name || tick), basket: b, shares_per_unit: spu, initial_units: units });
-    res.json({ ok: true, security_id: sec.id });
-  } catch (e) { res.status(400).json({ error: e.message }); }
+    const body = req.body || {};
+    const nm = text(body.name);
+    const tick = text(body.ticker).toUpperCase();
+    if (!/^[A-Z]{3,6}$/.test(tick)) return res.status(400).json({ error: 'Das Kürzel braucht 3 bis 6 Buchstaben.' });
+    if (q.secByTicker.get(tick)) throw new etf.EtfError('Dieses Kürzel gibt es schon.', 409);
+    if (nm.length < 3 || nm.length > 60) return res.status(400).json({ error: 'Der Name braucht 3 bis 60 Zeichen.' });
+    const desc = text(body.description);
+    if (desc.length > 200) return res.status(400).json({ error: 'Die Beschreibung hat höchstens 200 Zeichen.' });
+    const whole = etf.wholeNumber;
+    const spu = whole(body.shares_per_unit, 1, etf.LIMITS.shares_per_unit, 'Aktien je Anteil');
+    const units = whole(body.initial_units, 1, etf.LIMITS.initial_units, 'Anteile bei Start');
+    // Gleiche Aktie mehrfach im Korb wird zusammengezählt. Eintrag mit Stück 0 fällt weg;
+    // Brüche, negative Zahlen und Unsinnsfelder werden abgelehnt, nicht gerundet.
+    if (!Array.isArray(body.basket)) return res.status(400).json({ error: 'Wähl mindestens eine Aktie aus.' });
+    const qty = new Map();
+    for (const x of body.basket) {
+      if (!x || typeof x !== 'object') return res.status(400).json({ error: 'Der Korb enthält einen ungültigen Eintrag.' });
+      const id = whole(x.stock_id, 1, Number.MAX_SAFE_INTEGER, 'Die Aktie im Korb');   // Unbekannte IDs meldet die Schleife unten
+      const n = whole(x.qty, 0, etf.LIMITS.qty, 'Stück je Anteil');
+      if (n > 0) qty.set(id, (qty.get(id) || 0) + n);
+    }
+    if (!qty.size) return res.status(400).json({ error: 'Wähl mindestens eine Aktie aus.' });
+    const basket = [...qty].map(([stock_id, q]) => ({ stock_id, qty: q }));
+    for (const { stock_id } of basket) {
+      const s = q.secById.get(stock_id);
+      if (!s || s.type !== 'stock' || s.status !== 'active') return res.status(400).json({ error: 'Der Korb enthält einen Wert, der nicht handelbar ist.' });
+    }
+    const sec = etf.createEtf({ ticker: tick, name: nm, basket, shares_per_unit: spu, initial_units: units, description: desc });
+    res.json({ ok: true, security_id: sec.id, ticker: sec.ticker });
+  } catch (e) {
+    // Nur erwartete Ablehnungen tragen ihren Satz nach draußen; ein Serverfehler bekommt einen
+    // festen Satz, die Ursache steht im Log.
+    if (e instanceof etf.EtfError) return res.status(e.status).json({ error: e.message });
+    console.error('[ETF anlegen] Ungelöster Fehler:', e);
+    return res.status(500).json({ error: 'Das Anlegen ist fehlgeschlagen. Versuch es erneut.' });
+  }
 });
 router.get('/admin/etf/:id/preview', auth.requireAdmin, (req, res) => {
   try { res.json(etf.preview(Number(req.params.id), Number(req.query.units) || 1)); }
@@ -555,7 +652,7 @@ router.post('/admin/etf/:id/create-units', auth.requireAdmin, (req, res) => {
   try {
     const r = etf.createUnits(Number(req.params.id), req.body?.units);
     const n = addNews('etf', `ETF-Creation: ${q.secById.get(Number(req.params.id)).ticker}`,
-      `Die Investment AG hat ${r.units} Creation Units (${r.shares_created} ETF-Anteile) geschaffen und verkauft sie am Markt. Das drückt den ETF-Kurs Richtung NAV.`);
+      `Die Investment AG hat ${r.units} Creation Units (${r.shares_created} ETF-Anteile) geschaffen: Der AP hat den Korb gekauft — der Bestand der Staatskasse ist wieder aufgefüllt; der ETF notiert weiter am NAV.`);
     bus.emit({ type: 'news', news: n });
     res.json({ ok: true, ...r });
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -564,7 +661,7 @@ router.post('/admin/etf/:id/redeem-units', auth.requireAdmin, (req, res) => {
   try {
     const r = etf.redeemUnits(Number(req.params.id), req.body?.units);
     const n = addNews('etf', `ETF-Redemption: ${q.secById.get(Number(req.params.id)).ticker}`,
-      `Die Investment AG hat ${r.units} Creation Units (${r.shares_redeemed} ETF-Anteile) vernichtet und die Korb-Aktien am Markt verkauft. Das zieht den ETF-Kurs Richtung NAV.`);
+      `Die Investment AG hat ${r.units} Creation Units (${r.shares_redeemed} ETF-Anteile) vernichtet: Der AP hat ${r.shares_redeemed} Anteile eingelöst — die Korbaktien sind zurück im Bestand der Staatskasse; der ETF notiert weiter am NAV.`);
     bus.emit({ type: 'news', news: n });
     res.json({ ok: true, ...r });
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -606,6 +703,7 @@ function gameState() {
     paused: !!s.trading_paused, bots_running: !!s.bot_running,
     income_cent: s.income_cent, income_sec: s.income_sec, income_next_at: jobs.incomeNextAt(),
     start_capital: s.start_capital, fee_cent: s.fee_cent,
+    ipo_highlight_sec: s.ipo_highlight_sec, // öffentlich: wie lange ein Börsengang als „neu“ gilt (Sekunden, Wanduhr)
   };
 }
 function setPaused(paused) {

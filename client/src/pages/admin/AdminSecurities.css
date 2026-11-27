@@ -1,0 +1,18 @@
+/* Admin „Werte": Anträge an die Börse.
+   Die gemeinsame Zeile (styles.css:186) schneidet Titel und Zeile 2 mit „…" ab — bei einem Antrag
+   steht dort der Text des Schülers. Hier darf er umbrechen. Nicht für normale Listen übernehmen. */
+.admin-ipo { flex-wrap: wrap; align-items: flex-start; }
+.admin-ipo > .row-text { flex: 1 1 14rem; }
+.admin-ipo .row-title,
+.admin-ipo .row-sub { white-space: pre-wrap; overflow: visible; overflow-wrap: anywhere; }
+.admin-ipo > .row-trail { flex: none; }
+
+/* Fließtext im Sheet: Zeilenumbrüche des Schülers bleiben erhalten, lange Wörter brechen um. */
+.admin-text {
+  margin: 0;
+  max-width: 560px;
+  font-size: var(--ss-fs-base);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

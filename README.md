@@ -41,16 +41,38 @@ Zugänge danach: `admin` / `ag123`, Demo-Trader `Anna` … `Hannah` / `demo123`.
 
 ---
 
+## Was ist neu (27.11.2026)
+
+- **Bots handeln wie Händler, nicht wie Wurfmaterial.** Jeder Bot hat eine feste Persönlichkeit mit Zielanteil und Cash-Reserve; liegt sein Depot unter dem Ziel, kauft er, darüber verkauft er. Neue Bots starten mit einer Startposition aus dem Streubesitz, der Markt ist von der ersten Minute an zweiseitig. Deckel verhindern, dass alle Bots im selben Tick dieselbe Seite treffen.
+- **Gebühren kommen zurück.** Die Handelsgebühren fließen mit dem nächsten Einkommen an alle Konten zurück (Standard 100 %).
+- **Fast-Modus ist eine Spieluhr.** Handelsrate, News-Wirkung und Sperrzeiten laufen hundertmal schneller; das Kapital läuft nicht schneller leer. Das Einkommen bleibt standardmäßig an der Wanduhr, damit die Geldmenge nicht davonläuft.
+- **Streubesitz größer:** In jeder Aktie liegen rund 1 000 Stück im Orderbuch (vorher 385–519). „500 wanted, nur 200 verfügbar“ gehört der Vergangenheit an.
+- **News sind ereignisgetrieben:** Automatische Meldungen entstehen nur aus Marktdaten (Ausreißer, Marktstimmung, seltenes Gerücht der Investment AG). Die News-Seite zeigt Grafiken, ungelesene News und einen Zähler am Tab.
+- **Börsengänge prominenter:** Abschnitt „Neu an der Börse“ im Markt, Marker in der Werteliste, Hinweis auf dem Beamer; im Admin ist der Antragstext vollständig lesbar.
+- **Admin: ETF anlegen** im Bereich „Werte“, mit Vorschau und Prüfung, ob die Staatskasse den Korb besitzt.
+
+Details: `wiki/BOTS.md`, `wiki/NEWS.md`, `wiki/MATCHING-ENGINE.md`.
+
+---
+
 ## Für die Investment-AG: vier Bereiche, ohne Schulung
 
 | Bereich | Was du hier machst |
 |---|---|
-| **Spiel** | Börse pausieren und weiterlaufen lassen. Bots an- und ausschalten und einstellen, wie viel sie handeln — sie halten den Markt lebendig, wenn gerade niemand kauft. Einkommen (Betrag, Abstand, „Jetzt auszahlen"), Startkapital, Gebühr. |
+| **Spiel** | Börse pausieren und weiterlaufen lassen. Bots an- und ausschalten und einstellen, wie viel sie handeln — sie halten den Markt lebendig, wenn gerade niemand kauft. Schnellmodus (hundertmal so schnell, ein Schultag in wenigen Minuten). Einkommen (Betrag, Abstand, „Jetzt auszahlen"), Startkapital, Gebühr. |
 | **News** | Nachrichten schreiben, optional zu einem Wert. |
-| **Werte** | Dividende zahlen. Börsengänge freigeben (Zulassungspreis, Streubesitz) oder ablehnen. |
+| **Werte** | ETF anlegen. Dividende zahlen. Börsengänge freigeben (Zulassungspreis, Streubesitz) oder ablehnen. |
 | **Nutzer** | Passwort zurücksetzen, Guthaben aufladen, Konto einfrieren oder löschen. |
 
 Jede Einstellung hat in der Ansicht einen Satz Erklärung. Geld wird in Credits eingegeben.
+
+**Bots starten:** Admin → **Spiel** → „Bots einschalten". Beim ersten Mal legt die Börse 100 erfundene Mitspieler und bis zu vier Bot-Firmen an. „Wie viel die Bots handeln" (0–100, Standard 40) dreht die Zahl der Orders.
+
+**Fast-Modus:** **Spiel** → „Schnellmodus" → An. Läuft im laufenden Spiel; Handelsrate und News laufen mit. Das Einkommen kommt standardmäßig weiter nach Wanduhrzeit (z. B. einmal je Stunde), damit im Schnellmodus kein Geldüberhang entsteht.
+
+**ETF anlegen:** **Werte** → „Neuer ETF": Name, Kürzel, Beschreibung, Aktien je Anteil, Anteile bei Start, Zusammensetzung. Die Vorschau zeigt den Korb; fehlt der Staatskasse eine Aktie, steht da, wie viele Stück, und „Anlegen" bleibt gesperrt. Es wird nichts automatisch gekauft — die Staatskasse muss den Korb besitzen.
+
+**News selbst posten:** **News** → Titel, Text, optional Wert → „Veröffentlichen". Sie erscheint sofort bei allen. Das Formular hat auch **Art** (Nachricht, Gerücht, BaFin-Hinweis, Dividende) und **Kurswirkung** (ohne bis stark positiv/negativ): „Ohne Wirkung" macht die Bots nur auf den Wert aufmerksam, mit Kurswirkung kaufen oder verkaufen sie ihn eher.
 
 **Für den Unterricht bewährt**
 
@@ -63,14 +85,17 @@ Jede Einstellung hat in der Ansicht einen Satz Erklärung. Geld wird in Credits 
 
 ## Wie die Börse funktioniert
 
-- **Kurse entstehen nur durch Trades.** Der Market-Maker (die Staatskasse) legt Kauf- und Verkaufsangebote um den letzten Kurs; jede Order der Schüler bewegt den Kurs über diese Staffel.
+- **Kurse entstehen aus Orderflow.** Der Market-Maker (die Staatskasse) legt Kauf- und Verkaufsangebote um einen fairen Kurs. Den bewegt nur, was Schüler und Bots netto bei ihm kaufen oder verkaufen: Kaufen hebt ihn, Verkaufen senkt ihn, je mehr Stück, desto stärker. Der Limitpreis spielt keine Rolle, und Geschäfte zwischen zwei Schülern lassen den Kurs unverändert.
 - **Der Preis des Gegenübers gilt**, bei gleichem Preis die früher aufgegebene Order zuerst (Price-Time-Priority, wie an der Börse).
 - **Markt** kauft sofort zum besten verfügbaren Preis. **Limit** kauft nur zu deinem Preis oder besser.
 - **Gebühr** pro ausgeführter Order (Standard 20 Credits), Geld und Aktien werden bei der Order hinterlegt — nichts rutscht ins Minus.
-- **Preis-Band:** Limits dürfen höchstens 15 % vom Kurs entfernt liegen (Schutz vor Manipulation).
+- **Preis-Band:** Limits dürfen höchstens 15 % vom Kurs entfernt liegen, und gehandelt wird nur innerhalb dieses Bereichs (Schutz vor Manipulation).
+- **Ordergröße:** Eine Order an einer Aktie bewegt den Kurs höchstens um 15 %, liegende Orders beliefert der Market Maker nur bis zu ihrem Preis. Größere Markt-Orders werden abgelehnt („Teile die Order“), bei größeren Limit-Orders bleibt der Rest im Orderbuch.
 - **Börsengang:** Ein Schüler stellt im Profil einen Antrag, die Investment-AG gibt frei. Gründer dürfen ihre eigenen Aktien anfangs nicht verkaufen (Lock-up).
 - **Übernahme:** Hält jemand mehr als die Hälfte einer Firma, gibt es eine News.
-- **Schul-ETF:** Ein Korb aus mehreren Aktien, den die Staatskasse automatisch nah am Wert hält.
+- **Schul-ETF:** Ein Korb aus mehreren Aktien. Sein Kurs ist immer der Wert des Korbs (NAV): Die Staatskasse bietet ihn direkt am Wert an und schafft oder löst Anteile, sobald ihr eigener Bestand zu niedrig oder zu hoch ist — vollautomatisch.
+- **Bots:** Normale Konten mit eigener Persönlichkeit, Zielanteil und Startposition. Sie halten Cash in Reserve und handeln über die ganze Spieldauer; Details in `wiki/BOTS.md`.
+- **Einkommen und Gebühren:** Die Gebühren fließen mit dem Einkommen an alle aktiven Konten zurück.
 - **Inaktive Konten** werden nach drei Wochen gelöscht, das Vermögen fällt an die Staatskasse.
 
 ---
@@ -78,10 +103,13 @@ Jede Einstellung hat in der Ansicht einen Satz Erklärung. Geld wird in Credits 
 ## Tests und Lasttest
 
 ```bash
-npm test                                       # Server: Orders, Pause, Storno, Gewinn, WebSocket, Push
+npm test                                       # Server: Orders, Pause, Storno, Gewinn, WebSocket, Push, Market-Maker-Modell (reine Mathematik, Kurs aus Orderflow, Band, Stückgrenze), ETF-Automatik, Einstellungs-Migration
 npm run smoke                                 # ganze API von vorn bis hinten (eigene DB, Port 3100)
 node server/loadtest.js --clients 300 --seconds 20 --bots 100 --label neu
+node server/test/mm-sim.js --label neu --seconds 600 --activity 40 --tick 3 --reasons
 ```
+
+`mm-sim.js` misst das Kursverhalten im Bot-Modus auf einer eigenen Wegwerf-Datenbank: Volatilität, größten Kursschritt, Abweichung der ETFs vom NAV und (mit `--reasons`) die Ablehnungen der Bots nach Art. Die Tabelle erscheint auf dem Bildschirm; mit `--server <Verzeichnis>` läuft es auch gegen einen alten Stand.
 
 Der Lasttest startet einen eigenen Server auf Port 3199 mit einer temporären Datenbank und schreibt seinen Bericht nach `.agent-team/berichte/`. Die echte Börse wird nie berührt.
 
@@ -100,8 +128,11 @@ server/
   index.js        HTTP, statische App, WebSocket
   push.js         eine Nachricht einmal serialisieren, an alle senden
   engine.js       Orderbuch, Matching, Market-Maker
-  bots.js         Bot-Händler
-  jobs.js         Einkommen, Aufräumen, Kursverlauf
+  mmath.js        Rechenregeln des Market-Makers: fairer Kurs, Band, Staffel
+  bots.js         Bot-Händler (Startposition, Uhr, Ausführung)
+  botbrain.js     Entscheidungslogik der Bots (ohne Datenbank)
+  newsgen.js      automatische News aus Marktdaten
+  jobs.js         Einkommen und Gebühren-Recycling, News, Aufräumen, Kursverlauf
   etf.js          ETF-Wert und Automatik
   routes.js       REST-API unter /api
   db.js           SQLite, Schema, Einstellungen
@@ -118,7 +149,7 @@ Alles Geld ist in Cent gespeichert (Integer). Alle Farben und Abstände kommen a
 
 ### Einstellungen hinter dem Panel
 
-Das Panel zeigt fünf Einstellungen. Der Rest steht als Standard in `server/db.js` (`DEFAULT_SETTINGS`): Gebühr, Preis-Band, alles zum Market-Maker, Ghost-Frist und Lock-up. Wer sie ändern will, trägt den Wert einmalig in die Tabelle `settings` ein — sie bleiben bei Updates erhalten.
+Das Panel zeigt die Einstellungen zu Bots, Einkommen, Startkapital und Gebühr. Der Rest steht als Standard in `server/db.js` (`DEFAULT_SETTINGS`): alles zum Market Maker (Streubesitz, Mindestangebot, Nachplatzierung), Preis-Band, Ghost-Frist, Lock-up, Gebühren-Recycling, Bot-Reserve. Wer sie ändern will, trägt den Wert einmalig in die Tabelle `settings` ein oder schickt ihn an `PUT /api/admin/settings` — sie bleiben bei Updates erhalten. Die volle Liste steht in `wiki/BOTS.md` und `wiki/MATCHING-ENGINE.md`. Beim ersten Start mit Market Maker V3 löscht der Server die nicht mehr gebrauchten Market-Maker-Schlüssel und setzt `mm_spread_bp`, `mm_jitter_bp` und `mm_size` auf die neuen Standardwerte, sofern dort noch die alten stehen.
 
 ---
 
@@ -133,4 +164,4 @@ git show 4909373:client/src/pages/Desk.jsx            # ansehen
 git checkout 4909373 -- client/src/pages/Desk.jsx     # zurückholen
 ```
 
-Mehr zur Arbeitsweise von Bots und Matching: `wiki/BOTS.md`, `wiki/MATCHING-ENGINE.md`.
+Mehr zur Arbeitsweise von Bots, News und Matching: `wiki/BOTS.md`, `wiki/NEWS.md`, `wiki/MATCHING-ENGINE.md`.
