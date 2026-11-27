@@ -4,6 +4,13 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 
 const WSContext = createContext(null);
 
+// Ständige Empfänger (der Ticker-Speicher in hooks.jsx): bekommen jede Nachricht,
+// auch wenn gerade keine Seite auf sie hört. Sonst fiel der erste Ticker nach dem
+// Laden verloren, solange die Shell noch nicht stand — dann wartete die Liste
+// bis zum nächsten Takt (5 s) auf Kurse.
+const feeds = new Set();
+export function addFeed(fn) { feeds.add(fn); return () => { feeds.delete(fn); }; }
+
 export function WSProvider({ children }) {
   const [status, setStatus] = useState('connecting');
   const wsRef = useRef(null);
@@ -36,6 +43,9 @@ export function WSProvider({ children }) {
       ws.onmessage = (ev) => {
         let m;
         try { m = JSON.parse(ev.data); } catch { return; }
+        for (const fn of feeds) {
+          try { fn(m); } catch {}
+        }
         for (const fn of listenersRef.current) {
           try { fn(m); } catch {}
         }

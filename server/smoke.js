@@ -248,15 +248,25 @@ const PW = 'test1234';
     for (const [p, q] of asks) { const take = Math.min(left, q); expCost += take * p; left -= take; if (left <= 0) break; }
     assertEq(pv.json?.gross, expCost, 'preview: gross muss Level-für-Level walken');
     assert((pv.json?.fills || []).length >= 2, `preview: >=2 Fills erwartet: ${JSON.stringify(pv.json?.fills)}`);
-    assertEq(pv.json?.available, askDepth, 'preview: available = Ask-Gesamttiefe');
+    // Seit E010/E015 verlängert die MM die Leiste, bis die Angebotsseite mm_min_ask_shares hält: Die
+    // Vorschau sieht mehr Stück, als die Snapshot-Anzeige (oberste Level) des Orderbuchs zeigt.
+    // Also: mindestens die angezeigte Tiefe, und nie weniger als der Walk tatsächlich braucht.
+    assert(Number.isInteger(pv.json?.available) && pv.json.available >= askDepth,
+      `preview: available (${pv.json?.available}) unter der angezeigten Ask-Tiefe (${askDepth})`);
+    assert(pv.json?.available >= want, 'preview: weniger verfügbar als der Walk füllt');
     assert(pv.json?.avg_price > asks[0][0], 'preview: Ø-Preis über Best Ask (Walk schlägt Through)');
     ok('Preview: Book-Walk (Mengenstaffel, Ø-Preis, Tiefe) korrekt', true,
       `${want} Stück = ${expCost}c, Ø ${pv.json?.avg_price}c, ${pv.json?.fills?.length} Fills`);
 
-    // Market-Order über verfügbare Tiefe -> ehrlich abgelehnt
-    const tooMuch = await POST('/orders', { security_id: stock.id, side: 'buy', type: 'market', amount: askDepth + 5 }, t1);
+    // Market-Order über verfügbare Tiefe -> ehrlich abgelehnt. Über der Stückgrenze
+    // (cap aus der Vorschau) meldet der Server "Zu groß für eine Order", sonst "Liquidität".
+    const cap = pv.json?.cap; // Stückgrenze Q_max je Order (bei ETFs null)
+    const all = Math.max(askDepth, pv.json?.available || 0); // alles, was die Vorschau sieht
+    const tooMuch = await POST('/orders', { security_id: stock.id, side: 'buy', type: 'market', amount: all + 5 }, t1);
     assertEq(tooMuch.status, 400, `market über Tiefe (${tooMuch.status})`);
-    assert(/Liquidit/.test(String(tooMuch.json?.error || '')), `Meldung 'Liquidität' erwartet: ${tooMuch.json?.error}`);
+    const tooMuchError = String(tooMuch.json?.error || '');
+    assert(all + 5 > cap ? /Zu groß für eine Order/.test(tooMuchError) : /Liquidit/.test(tooMuchError),
+      `Meldung 'Liquidität' bzw. 'Zu groß für eine Order' erwartet (cap=${cap}): ${tooMuchError}`);
     ok('Handel: Market-Buy über verfügbare Tiefe -> 400', true, tooMuch.json?.error);
   });
 
@@ -270,9 +280,10 @@ const PW = 'test1234';
 
     const p = await port(t1);
     const have = (p.positions || []).find(x => x.security_id === stock.id)?.amount || 0;
-    const s = await POST('/orders', { security_id: stock.id, side: 'sell', type: 'limit', price: 1000, amount: have + 5 }, t1);
+    // Preis am oberen Band-Rand: die Ablehnung muss aus dem Depot kommen, nicht schon vom Preis-Band
+    const s = await POST('/orders', { security_id: stock.id, side: 'sell', type: 'limit', price: d.band.max, amount: have + 5 }, t1);
     assertEq(s.status, 400, `sell zu viele (${s.status})`);
-    assert(!!s.json?.error, 'sell zu viele: keine Fehlermeldung');
+    assert(/Depot/.test(String(s.json?.error || '')), `Meldung 'Nicht genug Aktien im Depot' erwartet: ${s.json?.error}`);
     ok('Handel: Verkauf von mehr Aktien als im Depot -> 400', true, s.json?.error);
   });
 
@@ -281,7 +292,7 @@ const PW = 'test1234';
     const d = (await GET(`/securities/${stock.id}`, t2)).json;
     const bid = d?.book?.bids?.[0]?.[0];
     assert(bid != null, 'kein bid für XETRA-Test');
-    const price = bid - 100; // ein Tick unter Best Bid -> kreuzt nichts
+    const price = bid - 100; // 10 Ticks à 10 Cent unter Best Bid -> kreuzt nichts
     const r = await POST('/orders', { security_id: stock.id, side: 'buy', type: 'limit', price, amount: 3 }, t2);
     assertEq(r.status, 200, `u2 limit buy status (${r.json?.error})`);
     assertEq(r.json.order.status, 'open', 'XETRA: order sollte open sein');
@@ -362,10 +373,23 @@ const PW = 'test1234';
     assertEq(ov.status, 200, `admin/overview (${ov.status})`);
     const tpos = (ov.json?.treasury?.positions || []).find(x => x.security_id === newSecId);
     assert(!!tpos, 'Treasury hat keine Position an der neuen Aktie');
-    // MM-Ask-Staffel (6 Stufen, 40..165 Stück = bis ~310) liegt treuhänderisch im Buch
-    assert(tpos.amount >= 0 && tpos.amount <= 400,
-      `Treasury sollte ~400 Float-Stücke haben (400 minus MM-Escrow): ${tpos?.amount}`);
-    ok('IPO: Treasury haelt die Float-Stuecke (~400 minus MM-Staffel)', true, `amount=${tpos?.amount}`);
+    // Seit E015 füllt die Nachplatzierung den Streubesitz eines frisch gelisteten Werts sofort auf
+    // mm_min_depth auf (bei 400 Stück Antrag auf 2000): die Staatskasse hält den float_shares aus dem
+    // Antrag PLUS die Nachplatzierung, abzüglich der MM-Verkaufsorders im Buch.
+    const settings = (await GET('/admin/settings', tAdmin)).json?.settings || {};
+    const nd = (await GET(`/securities/${newSecId}`)).json;
+    const mmEscrow = (nd?.book?.asks || []).reduce((acc, x) => acc + x[1], 0);
+    const expected = 400 + Math.max(0, Number(settings.mm_min_depth) - 400);
+    assert(tpos.amount + mmEscrow >= expected - 5,
+      `Treasury sollte ${expected} Stück halten (Antrag 400 + Auffüllung auf mm_min_depth): Depot ${tpos?.amount} + MM-Escrow ${mmEscrow}`);
+    ok('IPO: Treasury haelt float_shares + Auffuellung auf mm_min_depth (minus MM-Escrow)', true,
+      `Depot ${tpos?.amount} + Escrow ${mmEscrow}, mm_min_depth ${settings.mm_min_depth}`);
+    // Börsengang-News: der IPO ist über GET /api/news?kind=ipo auffindbar, der Konzept-Text steht ganz in der Meldung
+    const ipoNews = (await GET('/news?kind=ipo&security_id=' + newSecId)).json?.news || [];
+    assert(ipoNews.length === 1, `genau eine IPO-News zur neuen Aktie erwartet: ${ipoNews.length}`);
+    assert(String(ipoNews[0].body).includes('Smoke-Test GmbH'), 'IPO-News ohne den Konzept-Text des Antrags');
+    assert(ipoNews.every(n => n.kind === 'ipo' && n.security_id === newSecId), 'Filter kind=ipo&security_id fehlerhaft');
+    ok('IPO: GET /api/news?kind=ipo&security_id liefert die Boersengang-News mit Konzept', true, ipoNews[0].title);
   });
 
   // ======================= 7) DIVIDENDE =======================
@@ -374,9 +398,16 @@ const PW = 'test1234';
     const pv = await GET(`/admin/dividend/preview?security_id=${newSecId}&per_share=0.5`, tAdmin);
     assertEq(pv.status, 200, `preview (${pv.status}, ${pv.json?.error})`);
     assertEq(pv.json?.per_share, 50, 'preview: per_share (50c)');
-    // 1000 (u1) + Treasury-Rest (400 minus MM-Ask-Escrow ~310) abzueglich Schwankung
-    assert(pv.json?.total_shares >= 1000 && pv.json?.total_shares <= 1400,
-      `preview: total_shares sollte ~1090 (1000+400 minus MM-Escrow) sein: ${pv.json?.total_shares}`);
+    // 1000 (u1) + alles, was sonst im Umlauf ist: float_shares 400, durch die Nachplatzierung (E015/E017)
+    // auf mindestens mm_min_depth aufgefüllt und mit jeder Nachfrage nachgewachsen. Der Streubesitz
+    // steht komplett im Depot der Staatskasse (die MM-Ask-Orders werden daraus bedient) und bekommt die Dividende.
+    const minDepth = Number((await GET('/admin/settings', tAdmin)).json?.settings?.mm_min_depth);
+    const tposNow = ((await GET('/admin/overview', tAdmin)).json?.treasury?.positions || []).find(x => x.security_id === newSecId);
+    const expectedShares = 1000 + tposNow.amount;
+    assert(pv.json?.total_shares - 1000 >= minDepth,
+      `Streubesitz ${pv.json?.total_shares - 1000} unter mm_min_depth ${minDepth}`);
+    assert(Math.abs(pv.json?.total_shares - expectedShares) <= 5,
+      `preview: total_shares sollte ${expectedShares} sein (1000 Gründer + Streubesitz ${tposNow.amount}): ${pv.json?.total_shares}`);
     assertEq(pv.json?.total, pv.json.total_shares * 50, 'preview: total = total_shares x 50c');
     ok('Dividende: preview total = total_shares x 50c', true,
       `holders=${pv.json?.holders}, total_shares=${pv.json?.total_shares}, total=${pv.json?.total}`);
@@ -481,6 +512,60 @@ const PW = 'test1234';
       `index=${j.index}, history=${(j.index_history || []).length} Punkte`);
   });
 
+  // ======================= 11b) ETF ANLEGEN (ADMIN-ROUTE) =======================
+  await section('ETF anlegen: create-fund mit Beschreibung und 3 Positionen', async () => {
+    const e = (await GET('/admin/etf', tAdmin)).json || {};
+    const picks = (e.stocks || []).slice(0, 3);
+    assert(picks.length >= 3, `zu wenige Aktien für einen 3er-Korb: ${picks.length}`);
+    // Der Server kauft nichts dazu (E011): die Staatskasse muss den Korb haben — Bestand aus /admin/etf.
+    const have = Object.fromEntries((e.treasury_positions || []).map(p => [p.ticker, p.amount]));
+    for (const s of picks) assert((have[s.ticker] || 0) >= 2, `Staatskasse hat zu wenig ${s.ticker}: ${have[s.ticker]}`);
+    const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const tick = Array.from({ length: 4 }, () => letters[Math.floor(Math.random() * letters.length)]).join('');
+    const desc = 'Smoke-Korb: drei Werte aus dem Klassenzimmer.';
+    const r = await POST('/admin/etf/create-fund', {
+      name: `Smoke-Korb ${rnd}`, ticker: tick, description: desc,
+      basket: picks.map(s => ({ stock_id: s.id, qty: 1 })), shares_per_unit: 1, initial_units: 1
+    }, tAdmin);
+    assertEq(r.status, 200, `create-fund (${r.status}, ${r.json?.error})`);
+    assertEq(r.json?.ok, true, 'create-fund: ok');
+    const row = ((await GET('/securities')).json?.securities || []).find(s => s.id === r.json.security_id);
+    assert(!!row && row.type === 'etf', 'neuer ETF nicht in /securities (Chip-Feld type=etf)');
+    assert(row.bid != null && row.ask != null, 'neuer ETF ohne Geld/Brief');
+    const d = (await GET(`/securities/${row.id}`)).json;
+    assertEq(d?.security?.description, desc, 'Beschreibung des ETF');
+    assert(typeof d?.security?.nav?.nav_per_share === 'number' && d.security.nav.nav_per_share > 0, 'NAV des neuen ETF fehlt');
+    const inAdmin = ((await GET('/admin/etf', tAdmin)).json?.etfs || []).find(x => x.id === row.id);
+    assert(!!inAdmin && inAdmin.ticker === tick, 'neuer ETF fehlt in /admin/etf');
+    assert(Math.abs(inAdmin.nav_per_share - d.security.nav.nav_per_share) <= 1, 'NAV in /admin/etf und Aktienseite weicht ab');
+    // Ein Schüler kauft und verkauft eine Einheit über dieselbe Route wie jeder andere Wert.
+    const b = await POST('/orders', { security_id: row.id, side: 'buy', type: 'market', amount: 1 }, t2);
+    assertEq(b.status, 200, `ETF kaufen (${b.json?.error})`);
+    const s = await POST('/orders', { security_id: row.id, side: 'sell', type: 'market', amount: 1 }, t2);
+    assertEq(s.status, 200, `ETF verkaufen (${s.json?.error})`);
+    const left = ((await port(t2)).positions || []).find(x => x.security_id === row.id)?.amount || 0;
+    assertEq(left, 0, 'ETF-Einheit nach Verkauf noch im Depot');
+    ok('ETF anlegen: create-fund (Beschreibung, 3 Positionen) -> als Schüler sichtbar mit NAV, kauf- und verkäuflich', true,
+      `${tick} id=${r.json.security_id}, NAV ${d.security.nav.nav_per_share}c, Korb ${picks.map(x => x.ticker).join('/')}`);
+  });
+
+  // ======================= 11c) BOTS 5 s =======================
+  await section('Bots: 5 s Testspiel-Modus', async () => {
+    const start = await POST('/admin/bots/start', {}, tAdmin);
+    assertEq(start.status, 200, `bots/start (${start.status})`);
+    assertEq(start.json?.running, true, 'bots/start: running');
+    await new Promise(r => setTimeout(r, 5000));
+    const st = (await GET('/admin/bots', tAdmin)).json || {};
+    assertEq(st.running, true, 'bots laufen noch');
+    assert(st.bots >= 10, `zu wenige Bots angelegt: ${st.bots}`);
+    assert(st.errors === 0, `Bot-Fehler: ${st.errors}`);
+    const stop = await POST('/admin/bots/stop', {}, tAdmin);
+    assertEq(stop.json?.running, false, 'bots/stop: running=false');
+    assertEq((await GET('/game')).json?.bots_running, false, '/game: bots_running nach Stop');
+    ok('Bots: start -> 5 s -> keine Fehler, stop', true,
+      `${st.bots} Bots, ${st.trades_this_run} Trades, ${st.orders_this_run} Orders in 5 s`);
+  });
+
   // ======================= 12) SETTINGS + EINKOMMEN =======================
   await section('Settings & Einkommen', async () => {
     const put = await PUT('/admin/settings', { income_sec: 60 }, tAdmin);
@@ -494,8 +579,16 @@ const PW = 'test1234';
     const inc = await POST('/admin/income/now', {}, tAdmin);
     assertEq(inc.status, 200, `income/now (${inc.status})`);
     const after = (await port(t1)).cash;
-    assertEq(after - before, 100000, `u1 cash sollte +income_cent (100000c) steigen: ${after - before}`);
-    ok('Einkommen: income/now -> u1 cash +100000c', true, `${before} -> ${after}`);
+    // Seit V3 zahlt die Zahlung Einkommen + den Anteil an den zurückgeführten Gebühren
+    // (fee_pool_cent, gefüllt von jeder echten Gebühr dieses Laufs): es ist MINDESTENS das
+    // Einkommen, nie weniger; die Gebühren aus diesem Lauf sind oben mehrfach angefallen.
+    const income = Number(get.json?.settings?.income_cent);
+    const gain = after - before;
+    assert(Number.isInteger(income) && income > 0, `income_cent kein positiver Cent-Betrag: ${income}`);
+    assert(gain >= income, `u1 cash sollte um mindestens income_cent (${income}c) steigen: ${gain}`);
+    assert(gain - income <= FEE * 40, `Pool-Anteil unplausibel groß: ${gain - income}c`);
+    ok('Einkommen: income/now -> u1 cash +income_cent + Pool-Anteil (>= 100000c)', true,
+      `${before} -> ${after} (+${gain}c = ${income}c Einkommen + ${gain - income}c Gebühren-Rückführung)`);
   });
 
   // ======================= 13) ROLLENTRENNUNG =======================

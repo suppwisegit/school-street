@@ -1,0 +1,39 @@
+/* Depot — nur Variablen aus DESIGN.md. */
+.dep-hero {
+  padding: 8px 0 24px;
+}
+
+.dep-hero > p {
+  margin: 0;
+}
+
+.dep-pnl {
+  font-size: var(--ss-fs-md);
+  margin-top: 4px;
+}
+
+.dep-fact {
+  font-size: var(--ss-fs-base);
+  font-weight: 600;
+}
+
+.dep-id {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dep-value {
+  font-size: var(--ss-fs-base);
+  font-weight: 700;
+}
+
+.dep-empty .btn {
+  margin-top: 16px;
+}
+
+@media (min-width: 720px) {
+  .dep-hero {
+    padding-top: 16px;
+  }
+}

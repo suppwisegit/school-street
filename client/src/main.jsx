@@ -7,7 +7,6 @@ import { WSProvider } from './ws.jsx';
 import '@fontsource-variable/archivo';
 import '@fontsource-variable/archivo/wdth.css';
 import '@fontsource/instrument-sans/400.css';
-import '@fontsource/instrument-sans/500.css';
 import '@fontsource/instrument-sans/600.css';
 import '@fontsource/instrument-sans/700.css';
 import './styles.css';

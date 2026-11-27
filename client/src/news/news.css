@@ -1,0 +1,118 @@
+/* News-Zeile und News-Grafik (DESIGN.md §9.2/9.3) — nur Variablen. */
+
+/* Artikel: Zeile unter einer Haarlinie, kein Kasten (die Führung liegt bei .news-line). */
+.news-item {
+  position: relative;
+  padding: 16px var(--ss-gutter);
+  border-bottom: 1px solid var(--ss-line);
+}
+.news-item.is-link:hover { background: var(--ss-surface); cursor: pointer; }
+/* Fokus wie überall im Projekt (styles.css: 2px weiß, 2px Abstand), hier um den ganzen Artikel */
+.news-item:has(.news-btn-hit:focus-visible) { outline: 2px solid var(--ss-white); outline-offset: 2px; }
+
+/* Zeile: Grafik links, Textspalte rechts. */
+.news-btn {
+  display: flex; align-items: flex-start; gap: 12px;
+  width: 100%;
+  text-align: left;
+}
+
+/* Schaltfläche der Zeile: der Titeltext selbst. Keine überdeckende Fläche (kein ::after): sie
+   würde das Markieren von Schlagzeile und Text verhindern; die Klickfläche liefert der Artikel
+   (onClick in NewsRow). */
+.news-btn-hit {
+  display: inline; margin: 0; padding: 0;
+  border: 0; background: none; color: inherit; font: inherit; text-align: inherit;
+}
+.news-item.is-link, .news-item.is-link * { user-select: text; -webkit-user-select: text; }
+
+/* Nur für die Sprachausgabe */
+.news-sr {
+  position: absolute; width: 1px; height: 1px; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+
+/* Grafik-Box: Maße stehen im CSS, die Fläche steht sofort. 112×63 mobil, 160×90 ab 720 px. */
+.news-art {
+  flex: none; display: block; overflow: hidden;
+  width: 112px; height: 63px;
+  border: 1px solid var(--ss-line);
+  border-radius: var(--ss-radius-ctl);
+  background: var(--ss-surface);
+}
+.news-art-svg, .news-art-svg svg { display: block; width: 100%; height: 100%; }
+.news-art-tile { display: grid; place-items: center; width: 100%; height: 100%; background: var(--ss-surface-2); color: var(--ss-text-3); }
+
+.news-body { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+
+/* Metazeile */
+.news-head {
+  display: flex; align-items: center; gap: 8px;
+  min-width: 0; max-width: 100%;
+  font-size: var(--ss-fs-xs); font-weight: 600; line-height: 1.5;
+  color: var(--ss-text-3); white-space: nowrap;
+}
+.news-head > .chip { flex: none; }
+.news-mark { flex: none; width: 2px; height: 16px; margin-right: 6px; background: var(--ss-white); visibility: hidden; }
+.news-mark.on { visibility: visible; }
+.news-src { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ss-text-2); }
+.news-time { flex: none; margin-left: auto; }
+
+/* Schlagzeile: gelesen in text-2, ungelesen in text; höchstens zwei Zeilen.
+   Klemmung über die Höhe (2 × Zeilenhöhe) — wirkt in jedem Browser; line-clamp zusätzlich,
+   wo es unterstützt wird (liefert die Auslassungspunkte). */
+.news-title {
+  max-width: 100%; max-height: calc(2 * 1.45em);
+  font-size: var(--ss-fs-base); font-weight: 600; line-height: 1.45;
+  color: var(--ss-text-2);
+  overflow-wrap: anywhere;
+  display: block; overflow: hidden;
+  line-clamp: 2;
+}
+@supports (-webkit-line-clamp: 2) {
+  .news-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+}
+.is-unread .news-title { color: var(--ss-text); }
+
+/* Text: drei Zeilen, dieselbe Klemmung über die Höhe */
+.news-text {
+  max-height: calc(3 * 1.45em);
+  font-size: var(--ss-fs-sm); line-height: 1.45; color: var(--ss-text-2);
+  white-space: pre-line; overflow-wrap: anywhere;
+  display: block; overflow: hidden;
+  line-clamp: 3;
+}
+@supports (-webkit-line-clamp: 3) {
+  .news-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+}
+
+/* Wirkungszeile: nur bei News mit Wert. Links die Wirkung der Nachricht (Farbe nach impact),
+   rechts der Tageskurs als neutraler Chip mit der Aufschrift „heute“. */
+.news-fx { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; min-width: 0; margin-top: 4px; }
+.news-fx > .chip { flex: none; max-width: 100%; }
+/* „Wirkung:“ und „heute“ sind Zusätze im Chip: gleiche Farbe, nicht fett. */
+.news-fx-cap { font-weight: 500; color: var(--ss-text-3); }
+.news-fx-impact .news-fx-cap { margin-right: 4px; }
+.news-fx-chip .news-fx-cap { margin-right: 6px; }
+.news-fx-chip > .num { flex: none; font-variant-numeric: tabular-nums; }
+
+/* Kurzform (Markt, Handel, Board): Metazeile + Schlagzeile in einer Zeile, ohne Grafik und Text. */
+/* Ein echter <button> mit den Zeilen-Klassen braucht den Reset (die Zeile selbst ist ein div):
+   vor der Regel darunter, damit die Haarlinie unten bestehen bleibt. */
+button.news-btn--mini {
+  width: 100%; margin: 0; padding: 8px 0;
+  border: 0; border-bottom: 1px solid var(--ss-line);
+  background: none; color: inherit; font: inherit; text-align: left;
+  appearance: none; cursor: pointer;
+}
+.news-btn--mini { flex-direction: column; align-items: stretch; gap: 2px; min-height: var(--ss-row-h); padding: 8px 0; border-bottom: 1px solid var(--ss-line); }
+.news-btn--mini .news-title { max-height: calc(1 * 1.45em); white-space: nowrap; display: block; text-overflow: ellipsis; }
+button.news-btn--mini:hover { background: var(--ss-surface); }
+.news-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; font-size: var(--ss-fs-sm); color: var(--ss-text-2); }
+
+@media (min-width: 720px) {
+  .news-art { width: 160px; height: 90px; }
+}
+
+/* Volle Breite im Verhältnis 16:9 (News-Sheet) — gilt auch neben der 160×90-Regel */
+.news-art.news-art--wide { width: 100%; height: auto; aspect-ratio: 16 / 9; }

@@ -1,581 +1,336 @@
-// Admin: ETF-Zentrale – Creation/Redemption-Arbitrage, Treasury-Depot & AP-Terminal.
-// Eigenes Neo-Terminal-Design (etfx.css), bewusst ohne ui.jsx-Bausteine.
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { credsToCent, fmtC, snapToTick, tickOf } from '../../api.js';
-import '../../etfx.css';
+// Admin, Bereich „Werte", oberster Abschnitt: neuen ETF anlegen (Vertrag V6, DESIGN §12).
+// Der Korb wird nicht gekauft: Die Staatskasse muss die Aktien für die Anteile bei Start im Depot
+// haben. Der Server verlangt das (server/etf.js createEtf) — das Formular zeigt den Bestand je
+// Aktie und sperrt „Anlegen“, bevor etwas fehlschlägt.
+// Stand: GET /api/admin/etf (Aktien, Treasury-Positionen) + GET /api/securities (Kurse, Kürzel) alle 10 s.
+import React, { useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
+import { useOutletContext } from 'react-router-dom';
+import {
+  Button, Empty, ErrorBox, Field, Input, Money, Num, Pct, Row, Section, Sheet, SkelRows, Stepper, Symbol,
+  Textarea, useToast,
+} from '../../ui.jsx';
+import { usePoll } from '../../hooks.jsx';
+
+const DEFAULT_UNITS = 100;
+const MAX_NAME = 60;
+const MAX_DESCRIPTION = 200;
+const TICKER = /^[A-Z]{3,6}$/;
 
 const fmtI = (n) => (Number(n) || 0).toLocaleString('de-DE');
-const clsSign = (v) => (v > 0 ? 'etfx-pos' : v < 0 ? 'etfx-neg' : '');
+const EMPTY_FORM = { name: '', ticker: '', desc: '', spu: 1, units: DEFAULT_UNITS, qty: {} };
 
-// Betrag (Cents) – optional farbig/signed
-const Money = ({ c, colored = false, signed = false, big = false }) => {
-  const v = Number(c) || 0;
-  const cls = colored ? (v > 0 ? 'etfx-pos' : v < 0 ? 'etfx-neg' : '') : '';
-  return <b className={`etfx-num ${cls} ${big ? 'etfx-big' : ''}`.trim()}>{signed && v > 0 ? '+' : ''}{fmtC(v)}</b>;
-};
-
-// Wert erst nach Ruhephase weiterreichen (Live-Vorschau beim Tippen)
-function useDebounced(value, ms = 250) {
-  const [v, setV] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return v;
+// Bedarf und Besitz je Korbposition. `treasury`: Kürzel → Stück im Depot der Staatskasse.
+function holdingsOf(basket, units, treasury, nameOf) {
+  return basket.map((b) => {
+    const need = b.qty * units;
+    const have = treasury[b.ticker] || 0;
+    return { ticker: b.ticker, name: nameOf(b), qty: b.qty, need, have, short: Math.max(0, need - have) };
+  });
 }
+// Meldung bei Bestandsmangel, je Position ein Satz — dieselben Worte wie der Server.
+const shortageOf = (holdings) => holdings.filter((h) => h.short > 0)
+  .map((h) => `Die Staatskasse hat zu wenig ${h.ticker}: es fehlen ${fmtI(h.short)} Stück.`).join(' ');
 
-// Button mit Inline-Doppelklick-Bestätigung: 1. Klick rüstet, 2. Klick führt aus, 3 s Reset.
-function ConfirmBtn({ label, armedLabel = 'Sicher? Erneut klicken', onConfirm, className = '', disabled = false, timeout = 3000 }) {
-  const [armed, setArmed] = useState(false);
-  useEffect(() => {
-    if (!armed) return;
-    const t = setTimeout(() => setArmed(false), timeout);
-    return () => clearTimeout(t);
-  }, [armed, timeout]);
-  useEffect(() => { setArmed(false); }, [label]); // Kontext (z. B. Units) geändert -> neu bestätigen
-  return (
-    <button
-      type="button"
-      className={`etfx-btn ${className} ${armed ? 'armed' : ''}`}
-      disabled={disabled}
-      onClick={() => {
-        if (disabled) return;
-        if (!armed) { setArmed(true); return; }
-        setArmed(false);
-        onConfirm();
-      }}
-    >
-      {armed ? armedLabel : label}
-    </button>
-  );
-}
-
-export default function AdminEtf({ A, toast }) {
-  const [etfData, setEtfData] = useState(null); // {etfs, stocks, treasury_positions}
-  const [allSecs, setAllSecs] = useState([]);
-  const [autoCfg, setAutoCfg] = useState(null); // Settings für AUTO-AP-Chip
-  const [etfId, setEtfId] = useState('');
+export default function AdminEtf({ onCreated }) {
+  const { A } = useOutletContext();
+  const toast = useToast();
+  const [data, setData] = useState(null);      // { stocks, treasury } aus /api/admin/etf
+  const [secs, setSecs] = useState([]);        // Kurse und vergebene Kürzel aus /api/securities
   const [err, setErr] = useState('');
+  const [ver, setVer] = useState(0);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [touched, setTouched] = useState({});  // Feld wurde verlassen: Fehler ab jetzt zeigen
+  const [tried, setTried] = useState(false);   // erster Versuch abzusenden
+  const [draft, setDraft] = useState(null);    // Bestätigungsdialog: der eingefrorene Antrag
+  const [dlgErr, setDlgErr] = useState('');
+  const [saving, setSaving] = useState(false);
+  const inFlight = useRef(false);              // zweite Anfrage, solange die erste läuft (Doppel-Klick)
 
-  const load = useCallback(async () => {
-    try {
-      const [e, s, st] = await Promise.all([A('/api/admin/etf'), A('/api/securities'), A('/api/admin/settings')]);
-      setEtfData(e);
-      setAllSecs(s.securities || []);
-      setAutoCfg(st.settings || null);
-      setEtfId((cur) => cur || String(e.etfs?.[0]?.id || ''));
-      setErr('');
-    } catch (e2) { setErr(e2.message); }
-  }, [A]);
+  const bump = () => setVer((v) => v + 1);
 
-  useEffect(() => { load(); const t = setInterval(load, 20000); return () => clearInterval(t); }, [load]);
+  // Antworten einer älteren Abfrage dürfen eine neuere nicht überschreiben (Poll und Neuladen parallel)
+  const loadSeq = useRef(0);
+  const load = async () => {
+    const seq = ++loadSeq.current;
+    const [e, s] = await Promise.all([
+      A('/api/admin/etf').catch((x) => ({ error: x.message })),
+      A('/api/securities').catch((x) => ({ error: x.message })),
+    ]);
+    if (seq !== loadSeq.current) return;
+    if (e.error || s.error) { setErr(e.error || s.error); return; }
+    setErr('');
+    setData({
+      stocks: Array.isArray(e.stocks) ? e.stocks : [],
+      treasury: Object.fromEntries((Array.isArray(e.treasury_positions) ? e.treasury_positions : [])
+        .map((p) => [p.ticker, p.amount])),
+    });
+    setSecs(Array.isArray(s.securities) ? s.securities : []);
+  };
+  usePoll(load, 10000, [ver]);
 
-  const etfs = etfData?.etfs || [];
-  const etf = etfs.find((x) => String(x.id) === String(etfId)) || null;
-
-  return (
-    <div className="etfx-wrap">
-      <header className="etfx-head">
-        <div className="etfx-brand">
-          <span className="etfx-logo" />
-          <div>
-            <h2>ETF &amp; AP Terminal</h2>
-            <span className="etfx-sub">Authorized Participant · NAV-Arbitrage · Marktdata alle 20 s</span>
-          </div>
-        </div>
-        {autoCfg && (
-          <span className={`etfx-autochip ${Number(autoCfg.etf_auto) ? 'on' : 'off'}`} title="Auto-Arbitrage (Einstellungen → ETF Auto-Arbitrage)">
-            AUTO AP {Number(autoCfg.etf_auto) ? `aktiv · ±${autoCfg.etf_auto_threshold_pct}%` : 'aus'}
-          </span>
-        )}
-        {etfs.length > 0 && (
-          <select className="etfx-select etfx-headsel" value={etfId} onChange={(e) => setEtfId(e.target.value)}>
-            {etfs.map((e) => <option key={e.id} value={e.id}>{e.ticker} · {e.name}</option>)}
-          </select>
-        )}
-        <a className="etfx-btn ghost sm" href="/board" target="_blank" rel="noreferrer">Board ↗</a>
-      </header>
-
-      {err && <div className="etfx-note err">{err}</div>}
-      {!etfData && !err && <div className="etfx-loading"><i />Lade Marktdaten …</div>}
-      {etfData && !etf && etfs.length === 0 && (
-        <div className="etfx-note">Noch kein ETF vorhanden – unten einen neuen ETF anlegen.</div>
-      )}
-
-      {etf && <EtfStrip etf={etf} />}
-      {etf && <ArbTool etf={etf} A={A} toast={toast} reload={load} />}
-
-      {etfData && (
-        <div className="etfx-split">
-          {etf ? <BasketPanel etf={etf} treasury={etfData.treasury_positions || []} /> : <span />}
-          <TreasuryPanel positions={etfData.treasury_positions || []} />
-        </div>
-      )}
-
-      {etfData && (
-        <div className="etfx-split">
-          <ApTerminal A={A} toast={toast} allSecs={allSecs} reload={load} />
-          <CreateFund A={A} toast={toast} stocks={etfData.stocks || []} reload={load} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ---------------- Kurs vs. NAV (Kopfzeile) ----------------
-function EtfStrip({ etf }) {
-  const last = etf.ticker_data?.last ?? etf.last ?? 0;
-  const nav = etf.nav_per_share || 0;
-  const pct = Number(etf.premium_pct) || 0;
-  const w = Math.min(Math.abs(pct), 10) / 10 * 50; // Balken skaliert bis ±10 %
-  return (
-    <div className="etfx-strip">
-      <div className="etfx-stat"><span>ETF-Kurs</span><b className="etfx-num">{fmtC(last)}</b></div>
-      <div className="etfx-stat"><span>NAV / Anteil</span><b className="etfx-num">{fmtC(nav)}</b></div>
-      <div className="etfx-stat etfx-stat-prem">
-        <span>
-          Prämium / Discount{' '}
-          <b className={`etfx-num ${clsSign(pct)}`}>{pct > 0 ? '+' : ''}{pct.toFixed(2)} %</b>
-        </span>
-        <div className="etfx-prembar">
-          <i className="zero" />
-          <i
-            className={`fill ${pct >= 0 ? 'up' : 'down'}`}
-            style={pct >= 0 ? { left: '50%', width: `${w}%` } : { right: '50%', width: `${w}%` }}
-          />
-        </div>
-      </div>
-      <div className="etfx-stat"><span>Anteile im Umlauf</span><b className="etfx-num">{fmtI(etf.total_shares)}</b></div>
-      <div className="etfx-stat"><span>Anteile / Unit</span><b className="etfx-num">{fmtI(etf.shares_per_unit)}</b></div>
-    </div>
-  );
-}
-
-// ---------------- Creation/Redemption mit Live-Vorschau ----------------
-function ArbTool({ etf, A, toast, reload }) {
-  const [unitsText, setUnitsText] = useState('1');
-  const [preview, setPreview] = useState(null);
-  const [perr, setPerr] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [nonce, setNonce] = useState(0); // erzwingt Vorschau-Refresh nach Ausführung
-  const debounced = useDebounced(unitsText, 250);
-
-  const raw = Number(debounced);
-  const valid = debounced.trim() !== '' && raw >= 1;
-  const units = Math.max(1, Math.floor(raw || 0));
-  const shares = units * (etf.shares_per_unit || 1);
-  const pct = Number(etf.premium_pct) || 0;
-
-  // Auto-Vorschau: 250 ms nach letzter Eingabe bzw. bei neuen Kursen
-  useEffect(() => {
-    if (!valid) { setPreview(null); return; }
-    let alive = true;
-    setLoading(true); setPerr('');
-    A(`/api/admin/etf/${etf.id}/preview`, { params: { units } })
-      .then((r) => { if (alive) setPreview(r); })
-      .catch((e) => { if (alive) { setPerr(e.message); setPreview(null); } })
-      .finally(() => { if (alive) setLoading(false); });
-    return () => { alive = false; };
-  }, [A, etf.id, units, valid, etf.last, etf.nav_per_share, etf.basket_value, nonce]);
-
-  const step = (d) => setUnitsText(String(Math.max(1, Math.floor(Number(unitsText) || 0) + d)));
-
-  const execute = async (kind) => {
-    setBusy(true);
-    try {
-      const r = await A(`/api/admin/etf/${etf.id}/${kind === 'create' ? 'create-units' : 'redeem-units'}`, {
-        method: 'POST',
-        body: { units },
-      });
-      const sh = kind === 'create' ? r.shares_created : r.shares_redeemed;
-      toast(
-        kind === 'create'
-          ? `Creation: ${fmtI(sh)} ETF-Anteile geschaffen (NAV ${fmtC(r.nav_per_share)})`
-          : `Redemption: ${fmtI(sh)} ETF-Anteile vernichtet (NAV ${fmtC(r.nav_per_share)})`,
-        'ok',
-      );
-      reload();
-      setNonce((n) => n + 1);
-    } catch (e) { toast('' + e.message, 'err'); }
-    finally { setBusy(false); }
+  const set = (key) => (value) => setForm((f) => ({ ...f, [key]: value }));
+  const touch = (key) => setTouched((t) => (t[key] ? t : { ...t, [key]: true }));
+  const setQty = (stock, value) => {
+    setForm((f) => ({ ...f, qty: { ...f.qty, [stock.id]: value } }));
+    touch('basket');
   };
 
-  const c = preview?.creation;
-  const r = preview?.redemption;
+  const stocks = data ? data.stocks : [];
+  const treasury = data ? data.treasury : {};
+  const priceOf = useMemo(() => new Map(secs.map((s) => [s.id, Number(s.last) || 0])), [secs]);
+  const tickers = useMemo(() => new Set(secs.map((s) => s.ticker)), [secs]);
 
-  return (
-    <section className="etfx-panel">
-      <div className="etfx-panel-head">
-        <h3>Creation / Redemption</h3>
-        {loading
-          ? <span className="etfx-live"><i />rechnet …</span>
-          : (
-            <span className="etfx-head-hint">
-              {pct > 0 ? 'Prämium → Creation lohnt sich' : pct < 0 ? 'Discount → Redemption lohnt sich' : 'Kurs notiert am NAV'}
-            </span>
-          )}
-      </div>
+  // Korb: jede Aktie mit Stück > 0, dazu Kurs und Wert je Anteil
+  const basket = stocks
+    .filter((s) => (form.qty[s.id] || 0) > 0)
+    .map((s) => ({ ...s, qty: form.qty[s.id], price: priceOf.get(s.id) || 0 }))
+    .map((s) => ({ ...s, value: s.qty * s.price }));
+  const basketValue = basket.reduce((a, s) => a + s.value, 0);
 
-      <div className="etfx-units">
-        <div className="etfx-stepper">
-          <button type="button" onClick={() => step(-1)} disabled={units <= 1} aria-label="weniger Units">−</button>
-          <input
-            className="etfx-unitsinput" type="number" min="1" step="1" inputMode="numeric"
-            value={unitsText} onChange={(e) => setUnitsText(e.target.value)} aria-label="Creation Units"
-          />
-          <button type="button" onClick={() => step(1)} aria-label="mehr Units">+</button>
-        </div>
-        <div className="etfx-quick">
-          {[1, 5, 10].map((n) => (
-            <button key={n} type="button" className={Number(unitsText) === n ? 'on' : ''} onClick={() => setUnitsText(String(n))}>{n}</button>
-          ))}
-        </div>
-        <div className="etfx-unitseq">= <b className="etfx-num">{fmtI(shares)}</b> ETF-Anteile</div>
-      </div>
+  // Fehler je Feld; '' heißt in Ordnung.
+  const nm = form.name.trim();
+  const tk = form.ticker.trim();
+  const nameErr = !nm ? 'Gib einen Namen ein.' : nm.length > MAX_NAME ? `Der Name braucht höchstens ${MAX_NAME} Zeichen.`
+    : nm.length < 3 ? 'Der Name braucht mindestens 3 Zeichen.' : '';
+  const tickerErr = !tk ? 'Gib ein Kürzel ein.'
+    : !TICKER.test(tk) ? 'Das Kürzel braucht 3 bis 6 Buchstaben.'
+      : tickers.has(tk) ? 'Dieses Kürzel gibt es schon.' : '';
+  const descErr = form.desc.length > MAX_DESCRIPTION ? `Die Beschreibung hat höchstens ${MAX_DESCRIPTION} Zeichen.` : '';
+  const holdings = holdingsOf(basket, form.units, treasury, (b) => b.name);
+  const shortage = shortageOf(holdings);
+  const basketErr = basket.length ? '' : 'Wähl mindestens eine Aktie aus.';
+  const invalid = Boolean(nameErr || tickerErr || descErr || basketErr);
+  const show = (key) => touched[key] || tried;
 
-      {perr && <div className="etfx-note err">{perr}</div>}
-      {!valid && <div className="etfx-note">Anzahl Units (≥ 1) eingeben – die Vorschau rechnet automatisch mit.</div>}
+  // Pflichtfelder leer: der Knopf ist ausgegraut, bleibt aber bedienbar — der Klick zeigt die Sätze
+  // an den Feldern. Ein deaktivierter Knopf würde nichts erklären.
+  const missing = [
+    ...(nm ? [] : ['Name']), ...(tk ? [] : ['Kürzel']), ...(basket.length ? [] : ['mindestens eine Aktie']),
+  ];
+  const incomplete = missing.length > 0;
+  const missingHint = incomplete
+    ? `${missing.join(', ').replace(/^./, (c) => c.toUpperCase())} ${missing.length === 1 ? 'fehlt noch.' : 'fehlen noch.'}`
+    : '';
 
-      {valid && c && r && (
-        <div className="etfx-arbgrid">
-          <div className="etfx-side create">
-            <div className="etfx-side-head">
-              <h4>Creation</h4>
-              {pct > 0 && <span className="etfx-tag green">empfohlen</span>}
-            </div>
-            <p className="etfx-side-sub">Korb kaufen → {fmtI(shares)} Anteile schaffen → am Markt verkaufen</p>
-            <div className="etfx-kv"><span>Korb-Kauf</span><b className="etfx-num">− {fmtC(c.buy_basket_cost)}</b></div>
-            <div className="etfx-kv"><span>ETF-Verkauf</span><b className="etfx-num">+ {fmtC(c.etf_sell_proceeds)}</b></div>
-            <div className="etfx-profit"><span>geschätzter Profit</span><Money c={c.est_profit} colored signed big /></div>
-            {c.basket_shortfalls?.length > 0 && (
-              <div className="etfx-note warn">
-                Treasury-Fehlbestand – erst im AP-Terminal nachkaufen:{' '}
-                {c.basket_shortfalls.map((s) => `${s.ticker} ${fmtI(s.have)}/${fmtI(s.need)}`).join(', ')}
-              </div>
-            )}
-            {c.etf_sell_shortfall > 0 && (
-              <div className="etfx-note warn">Orderbuch zu dünn: {fmtI(c.etf_sell_shortfall)} ETF-Anteile bleiben unverkauft liegen.</div>
-            )}
-            <ConfirmBtn
-              className="buy block" disabled={busy}
-              label={`${fmtI(units)} Unit${units === 1 ? '' : 's'} erstellen`}
-              onConfirm={() => execute('create')}
-            />
-          </div>
+  const openDialog = () => {
+    if (inFlight.current) return;
+    setTried(true);
+    if (invalid) return;
+    setDlgErr('');
+    setDraft({
+      name: nm, ticker: tk, desc: form.desc.trim(), spu: form.spu, units: form.units,
+      basket: basket.map((s) => ({ stock_id: s.id, ticker: s.ticker, qty: s.qty })),
+    });
+  };
 
-          <div className="etfx-side redeem">
-            <div className="etfx-side-head">
-              <h4>Redemption</h4>
-              {pct < 0 && <span className="etfx-tag red">empfohlen</span>}
-            </div>
-            <p className="etfx-side-sub">ETF-Anteile zurückkaufen → einlösen → Korb verkaufen</p>
-            <div className="etfx-kv"><span>ETF-Kauf</span><b className="etfx-num">− {fmtC(r.etf_buy_cost)}</b></div>
-            <div className="etfx-kv"><span>Korb-Verkauf</span><b className="etfx-num">+ {fmtC(r.basket_sell_proceeds)}</b></div>
-            <div className="etfx-profit"><span>geschätzter Profit</span><Money c={r.est_profit} colored signed big /></div>
-            {r.etf_buy_shortfall > 0 && (
-              <div className="etfx-note warn">Nicht genug ETF-Verkäufe im Buch: {fmtI(r.etf_buy_shortfall)} Anteile fehlen.</div>
-            )}
-            {r.basket_sell_shortfalls?.length > 0 && (
-              <div className="etfx-note warn">
-                Korb nur teils verkäuflich: {r.basket_sell_shortfalls.map((s) => s.ticker).join(', ')}.
-              </div>
-            )}
-            <ConfirmBtn
-              className="sell block" disabled={busy}
-              label={`${fmtI(units)} Unit${units === 1 ? '' : 's'} einlösen`}
-              onConfirm={() => execute('redeem')}
-            />
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}
+  // Absenden: Eine getippte Zahl im Stepper zählt erst, wenn das Feld verlassen wird. Steht der
+  // Cursor noch in einem Stepper (Enter im Stepper oder ein Klick, der den Fokus nicht bewegt),
+  // wird es hier verlassen und der Stand sofort übernommen — sonst prüfte der Dialog die Zahl
+  // von vor der Eingabe.
+  const submitRef = useRef(null);
+  submitRef.current = openDialog;
+  const submitForm = (e) => {
+    e.preventDefault();
+    const el = document.activeElement;
+    if (el instanceof HTMLElement && e.currentTarget.contains(el) && el.closest('.stepper')) flushSync(() => el.blur());
+    submitRef.current();
+  };
 
-// ---------------- Korb-Zusammensetzung ----------------
-function BasketPanel({ etf, treasury }) {
-  const have = useMemo(() => {
-    const m = new Map();
-    (treasury || []).forEach((p) => m.set(p.ticker, p.amount));
-    return m;
-  }, [treasury]);
-
-  return (
-    <section className="etfx-panel">
-      <div className="etfx-panel-head">
-        <h3>Korb · {etf.ticker}</h3>
-        <span className="etfx-head-hint">Wert pro Unit <b className="etfx-num">{fmtC(etf.basket_value)}</b></span>
-      </div>
-      <table className="etfx-tbl">
-        <thead>
-          <tr><th>Aktie</th><th className="r">Stück/Unit</th><th className="r">Kurs</th><th className="r">Wert/Unit</th><th className="r">Treasury</th></tr>
-        </thead>
-        <tbody>
-          {(etf.items || []).map((it) => {
-            const dep = have.get(it.ticker) || 0;
-            return (
-              <tr key={it.ticker}>
-                <td><b>{it.ticker}</b></td>
-                <td className="r etfx-num">{fmtI(it.qty)}</td>
-                <td className="r etfx-num">{fmtC(it.price)}</td>
-                <td className="r etfx-num">{fmtC(it.value)}</td>
-                <td className={`r etfx-num ${dep < it.qty ? 'etfx-neg' : 'etfx-muted'}`}>{fmtI(dep)}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </section>
-  );
-}
-
-// ---------------- Treasury-Depot ----------------
-function TreasuryPanel({ positions }) {
-  return (
-    <section className="etfx-panel">
-      <div className="etfx-panel-head">
-        <h3>Treasury-Depot</h3>
-        <span className="etfx-head-hint">{positions.length} {positions.length === 1 ? 'Position' : 'Positionen'}</span>
-      </div>
-      {positions.length === 0
-        ? <div className="etfx-empty">Leer. Über das AP-Terminal Korb-Aktien kaufen – ohne Bestand keine Creation.</div>
-        : (
-          <div className="etfx-chips">
-            {positions.map((p, i) => (
-              <span className="etfx-chip" key={i}><b>{p.ticker}</b><span className="etfx-num">{fmtI(p.amount)}</span></span>
-            ))}
-          </div>
-        )}
-    </section>
-  );
-}
-
-// ---------------- AP-Handelsterminal ----------------
-function ApTerminal({ A, toast, allSecs, reload }) {
-  const [orders, setOrders] = useState([]);
-  const [secId, setSecId] = useState('');
-  const [side, setSide] = useState('buy');
-  const [type, setType] = useState('limit');
-  const [price, setPrice] = useState('');
-  const [amount, setAmount] = useState('');
-  const [err, setErr] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const loadOrders = useCallback(async () => {
-    try { const r = await A('/api/admin/treasury/orders'); setOrders(r.orders || []); } catch { /* ignoriert */ }
-  }, [A]);
-  useEffect(() => { loadOrders(); const t = setInterval(loadOrders, 10000); return () => clearInterval(t); }, [loadOrders]);
-
-  const sec = allSecs.find((s) => String(s.id) === String(secId));
-  const amt = Math.floor(Number(amount) || 0);
-  const cents = credsToCent(price);
+  // Bestätigungsdialog: Bedarf und Besitz gegen den jeweils aktuellen Treasury-Stand
+  const dHoldings = draft ? holdingsOf(draft.basket, draft.units, treasury, (b) => b.ticker) : [];
+  const dShort = dHoldings.filter((h) => h.short > 0);
+  const dShortage = shortageOf(dHoldings);
+  const dValue = draft ? draft.basket.reduce((a, b) => a + b.qty * (priceOf.get(b.stock_id) || 0), 0) : 0;
 
   const submit = async () => {
-    setErr('');
-    if (!secId) return setErr('Wertpapier wählen');
-    if (amt < 1) return setErr('Ungültige Stückzahl');
-    const body = { security_id: Number(secId), side, type, amount: amt };
-    if (type === 'limit') {
-      if (cents <= 0) return setErr('Limit-Preis fehlt');
-      body.price = snapToTick(cents, sec?.type);
-    }
-    setBusy(true);
-    try {
-      const res = await A('/api/admin/treasury/order', { method: 'POST', body });
-      const trades = res.trades || [];
-      toast(trades.length ? `Treasury: ${fmtI(trades.reduce((a, t) => a + t.amount, 0))} Stück gehandelt` : 'Treasury-Order im Buch', 'ok');
-      setAmount('');
-      loadOrders();
-      reload();
-    } catch (e) {
-      setErr(e.message);
-      toast('' + e.message, 'err');
-    } finally { setBusy(false); }
-  };
-
-  const cancel = async (o) => {
-    try {
-      await A(`/api/admin/treasury/cancel/${o.id}`, { method: 'POST' });
-      toast('Treasury-Order storniert', 'ok');
-      loadOrders();
-      reload();
-    } catch (e) { toast('' + e.message, 'err'); }
-  };
-
-  return (
-    <section className="etfx-panel">
-      <div className="etfx-panel-head">
-        <h3>AP-Handelsterminal</h3>
-        <span className="etfx-head-hint">Staatskasse handelt am Markt</span>
-      </div>
-
-      <div className="etfx-apform">
-        <select className="etfx-select grow" value={secId} onChange={(e) => setSecId(e.target.value)}>
-          <option value="">Wertpapier …</option>
-          {allSecs.map((s) => <option key={s.id} value={s.id}>{s.ticker} · {s.name}{s.type === 'etf' ? ' (ETF)' : ''}</option>)}
-        </select>
-        <div className={`etfx-seg ${side === 'buy' ? 'seg-buy' : 'seg-sell'}`}>
-          <button type="button" className={side === 'buy' ? 'on' : ''} onClick={() => setSide('buy')}>Kaufen</button>
-          <button type="button" className={side === 'sell' ? 'on' : ''} onClick={() => setSide('sell')}>Verkaufen</button>
-        </div>
-        <div className="etfx-seg">
-          <button type="button" className={type === 'limit' ? 'on' : ''} onClick={() => setType('limit')}>Limit</button>
-          <button type="button" className={type === 'market' ? 'on' : ''} onClick={() => setType('market')}>Market</button>
-        </div>
-        <input
-          className="etfx-input num amt" type="number" min="1" step="1" placeholder="Stück"
-          value={amount} onChange={(e) => setAmount(e.target.value)}
-        />
-        {type === 'limit' && (
-          <input
-            className="etfx-input num px" type="number" min="0" step="0.1"
-            placeholder={sec ? `Limit · Tick ${(tickOf(sec.type) / 100).toFixed(2)}` : 'Limit'}
-            value={price} onChange={(e) => setPrice(e.target.value)}
-          />
-        )}
-        <button type="button" className={`etfx-btn ${side === 'buy' ? 'buy' : 'sell'}`} disabled={busy} onClick={submit}>
-          {busy ? '…' : side === 'buy' ? 'Kaufen' : 'Verkaufen'}
-        </button>
-      </div>
-      {err && <div className="etfx-note err">{err}</div>}
-
-      <div className="etfx-subhead">Offene Orders ({orders.length})</div>
-      {orders.length === 0
-        ? <div className="etfx-empty">Keine offenen Treasury-Orders.</div>
-        : orders.map((o) => (
-          <div className="etfx-ordrow" key={o.id}>
-            <span>
-              <b>{o.ticker}</b>{' '}
-              <b className={o.side === 'buy' ? 'etfx-pos' : 'etfx-neg'}>{o.side === 'buy' ? 'Kauf' : 'Verkauf'}</b>{' '}
-              <span className="etfx-muted etfx-num">{fmtI(o.filled)}/{fmtI(o.amount)} {o.type === 'limit' ? '@ ' + fmtC(o.price) : 'Market'}</span>
-            </span>
-            <button type="button" className="etfx-btn sm ghost danger" onClick={() => cancel(o)}>Storno</button>
-          </div>
-        ))}
-    </section>
-  );
-}
-
-// ---------------- Neuen ETF anlegen ----------------
-function CreateFund({ A, toast, stocks, reload }) {
-  const [open, setOpen] = useState(false);
-  const [ticker, setTicker] = useState('');
-  const [name, setName] = useState('');
-  const [spu, setSpu] = useState('10');
-  const [units, setUnits] = useState('5');
-  const [basket, setBasket] = useState([{ stock_id: '', qty: '' }]);
-  const [err, setErr] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const rows = basket.map((b) => ({
-    ...b,
-    qtyN: Math.floor(Number(b.qty) || 0),
-  }));
-
-  // Live-Inline-Validierung
-  const problems = [];
-  if (!/^[A-Z]{3,6}$/.test(ticker.trim())) problems.push('Ticker: 3–6 Großbuchstaben');
-  if (!(Number(spu) >= 1)) problems.push('Anteile pro Unit ≥ 1');
-  if (!(Number(units) >= 1)) problems.push('Initiale Units ≥ 1');
-  if (!rows.some((x) => x.stock_id && x.qtyN > 0)) problems.push('Korb: mind. eine Aktie mit Stückzahl');
-  const started = ticker.trim() !== '' || name.trim() !== '' || rows.some((x) => x.stock_id || x.qty);
-
-  const needLine = rows
-    .filter((x) => x.stock_id && x.qtyN > 0)
-    .map((x) => {
-      const s = stocks.find((y) => String(y.id) === String(x.stock_id));
-      return s ? `${s.ticker} ${fmtI(x.qtyN * Math.floor(Number(units) || 0))}` : null;
-    })
-    .filter(Boolean)
-    .join(', ');
-
-  const submit = async () => {
-    if (problems.length) return;
-    const tick = ticker.trim().toUpperCase();
-    setErr('');
-    setBusy(true);
+    if (inFlight.current || dShort.length) return;
+    inFlight.current = true;
+    setSaving(true);
+    setDlgErr('');
     try {
       await A('/api/admin/etf/create-fund', {
         method: 'POST',
         body: {
-          ticker: tick,
-          name: name.trim() || tick,
-          shares_per_unit: Number(spu),
-          initial_units: Number(units),
-          basket: rows.filter((x) => x.stock_id && x.qtyN > 0).map((x) => ({ stock_id: Number(x.stock_id), qty: x.qtyN })),
+          ticker: draft.ticker, name: draft.name, description: draft.desc,
+          shares_per_unit: draft.spu, initial_units: draft.units,
+          basket: draft.basket.map(({ stock_id, qty }) => ({ stock_id, qty })),
         },
       });
-      toast(`ETF ${tick} gestartet`, 'ok');
-      setTicker(''); setName(''); setSpu('10'); setUnits('5'); setBasket([{ stock_id: '', qty: '' }]);
-      setOpen(false);
-      reload();
-    } catch (e) { setErr(e.message); }
-    finally { setBusy(false); }
+      toast(`${draft.ticker} ist jetzt an der Börse.`, 'ok');
+      setDraft(null);
+      setForm(EMPTY_FORM);
+      setTouched({});
+      setTried(false);
+      bump();            // vergebene Kürzel und Bestand sofort neu lesen
+      onCreated?.();
+    } catch (e) {
+      // Der Dialog bleibt offen; der Satz steht darin und als Toast.
+      setDlgErr(e.message);
+      toast(e.message, 'err');
+    } finally {
+      inFlight.current = false;
+      setSaving(false);
+    }
   };
 
+  const close = () => { if (!saving) setDraft(null); };
+  const errBox = <ErrorBox onRetry={bump}>{`Das ging nicht. ${err}`}</ErrorBox>;
+
   return (
-    <section className="etfx-panel">
-      <button type="button" className="etfx-foldbtn" onClick={() => setOpen((o) => !o)}>
-        <span>{open ? '▾' : '▸'} Neuen ETF anlegen</span>
-        {!open && <span className="etfx-head-hint">Ticker · Korb · Start-Units</span>}
-      </button>
+    <div className="admin-etf">
+      <Section title="Neuer ETF">
+        {!data ? (
+          err ? errBox : <SkelRows n={6} />
+        ) : (
+          <>
+            {err ? errBox : null}
+            {stocks.length === 0 ? (
+              <Empty title="Noch keine Aktien">
+                Ein ETF braucht mindestens eine Aktie im Korb. Sobald eine Firma an der Börse ist, kannst du anlegen.
+              </Empty>
+            ) : (
+              <div className="admin-etf-grid">
+                <form
+                  className="admin-form"
+                  noValidate
+                  onSubmit={submitForm}
+                >
+                  <Field label="Name" help="Steht neben dem Kürzel." htmlFor="etf-name" error={show('name') ? nameErr : ''}>
+                    <Input id="etf-name" value={form.name} maxLength={MAX_NAME} autoComplete="off"
+                      onChange={(e) => set('name')(e.target.value)} onBlur={() => touch('name')} />
+                  </Field>
+                  <Field label="Kürzel" help="3 bis 6 Buchstaben, z. B. SCHUL." htmlFor="etf-ticker" error={show('ticker') ? tickerErr : ''}>
+                    <Input id="etf-ticker" className="num" value={form.ticker} maxLength={6} autoComplete="off" spellCheck={false}
+                      onChange={(e) => set('ticker')(e.target.value.toUpperCase().replace(/[^A-Z]/g, ''))}
+                      onBlur={() => touch('ticker')} />
+                  </Field>
+                  <Field label="Beschreibung" help={`Ein Satz, was der ETF abbildet. Optional, bis ${MAX_DESCRIPTION} Zeichen.`}
+                    htmlFor="etf-desc" error={show('desc') ? descErr : ''}>
+                    <Textarea id="etf-desc" value={form.desc} maxLength={MAX_DESCRIPTION} rows={3}
+                      onChange={(e) => set('desc')(e.target.value)} onBlur={() => touch('desc')} />
+                  </Field>
+                  <Field label="Aktien je Anteil" help="So viele Aktien liegen in einem Anteil. 1 ist am einfachsten." htmlFor="etf-spu">
+                    <Stepper id="etf-spu" value={form.spu} min={1} max={100} onChange={set('spu')} label="Aktien je Anteil" suffix="Aktien" />
+                  </Field>
+                  <Field label="Anteile bei Start" help="So viele Anteile gibt es am Anfang. Die Staatskasse muss die Aktien dafür besitzen."
+                    htmlFor="etf-units">
+                    <Stepper id="etf-units" value={form.units} min={1} max={100000} onChange={set('units')} label="Anteile bei Start" suffix="Anteile" />
+                  </Field>
+                  <Field label="Zusammensetzung" help="Stück je Anteil: wie viele Aktien jedes Werts in einem Anteil liegen."
+                    error={show('basket') ? (basketErr || shortage) : ''}>
+                    <div id="etf-basket" className="admin-etf-basket">
+                      {stocks.map((s) => {
+                        const q = form.qty[s.id] || 0;
+                        const need = q * form.units;
+                        const have = treasury[s.ticker] || 0;
+                        return (
+                          <Row
+                            key={s.id}
+                            className="admin-etf-pos"
+                            leading={(
+                              <Symbol ticker={s.ticker} name={s.name}
+                                sub={q > 0 ? `Braucht ${fmtI(need)} · Staatskasse hat ${fmtI(have)}` : `Staatskasse hat ${fmtI(have)} Stück`} />
+                            )}
+                            trailing={<Stepper value={q} min={0} max={100000} label={`Stück je Anteil ${s.ticker}`} onChange={(v) => setQty(s, v)} />}
+                          />
+                        );
+                      })}
+                    </div>
+                  </Field>
+                  <div className="admin-etf-submit">
+                    <Button
+                      type="submit"
+                      full
+                      loading={saving}
+                      className={incomplete ? 'admin-etf-incomplete' : ''}
+                    >
+                      ETF anlegen
+                    </Button>
+                    {incomplete && !saving ? (
+                      <p className="admin-note" role="status">{missingHint}</p>
+                    ) : null}
+                  </div>
+                </form>
 
-      {open && (
-        <>
-          <div className="etfx-note">Der Treasury braucht die Korb-Aktien für alle initialen Units <b>vorher</b> im Depot (AP-Terminal).</div>
-          {needLine && <div className="etfx-note">Benötigt im Treasury-Depot: <b className="etfx-num">{needLine}</b> Stück</div>}
-          {started && problems.length > 0 && <div className="etfx-note warn">{problems.join(' · ')}</div>}
-          {err && <div className="etfx-note err">{err}</div>}
+                <Section title="So sieht der ETF aus" className="admin-etf-preview">
+                  {basket.length === 0 ? (
+                    <Empty title="Noch leer">Wähl eine Aktie aus, dann steht der Korb hier.</Empty>
+                  ) : (
+                    <>
+                      <div className="admin-etf-head">
+                        <div className="admin-etf-title">
+                          <div className="num num-lg">{tk || 'Kürzel'}</div>
+                          <div className="admin-etf-name">{nm || 'Name'}</div>
+                        </div>
+                        <div className="admin-etf-nav">
+                          <Money c={form.spu ? basketValue / form.spu : basketValue} className="num-lg" />
+                          <div className="small muted">bei {fmtI(form.units)} Anteilen</div>
+                        </div>
+                      </div>
+                      {basket.map((s) => (
+                        <Row
+                          key={s.id}
+                          leading={<Symbol ticker={s.ticker} name={s.name} />}
+                          trailing={(
+                            <>
+                              <span><Num v={s.qty} /> Stück · <Money c={s.value} /></span>
+                              <span className="small muted"><Pct v={basketValue ? (s.value / basketValue) * 100 : 0} /></span>
+                            </>
+                          )}
+                        />
+                      ))}
+                      <div className="admin-etf-sum">
+                        <span>Korb je Anteil</span>
+                        <Money c={basketValue} />
+                      </div>
+                    </>
+                  )}
+                  <p className="admin-note">Die Kurse stehen still; der NAV wird beim Anlegen neu berechnet.</p>
+                </Section>
+              </div>
+            )}
+          </>
+        )}
+      </Section>
 
-          <div className="etfx-frow">
-            <label className="etfx-field">
-              <span>Ticker</span>
-              <input className="etfx-input" value={ticker} placeholder="z. B. PIZZA" onChange={(e) => setTicker(e.target.value.toUpperCase())} />
-            </label>
-            <label className="etfx-field">
-              <span>Name</span>
-              <input className="etfx-input" value={name} placeholder="z. B. Schul-Indexfonds" onChange={(e) => setName(e.target.value)} />
-            </label>
-            <label className="etfx-field">
-              <span>Anteile / Unit</span>
-              <input className="etfx-input num" type="number" min="1" step="1" value={spu} onChange={(e) => setSpu(e.target.value)} />
-            </label>
-            <label className="etfx-field">
-              <span>Initiale Units</span>
-              <input className="etfx-input num" type="number" min="1" step="1" value={units} onChange={(e) => setUnits(e.target.value)} />
-            </label>
-          </div>
-
-          <div className="etfx-subhead">Korb</div>
-          {rows.map((row, i) => (
-            <div className="etfx-brow" key={i}>
-              <select
-                className="etfx-select" value={row.stock_id}
-                onChange={(e) => setBasket((b) => b.map((x, j) => (j === i ? { ...x, stock_id: e.target.value } : x)))}
-              >
-                <option value="">Aktie …</option>
-                {stocks.map((s) => <option key={s.id} value={s.id}>{s.ticker} · {s.name}</option>)}
-              </select>
-              <input
-                className="etfx-input num" type="number" min="1" step="1" placeholder="Stück/Unit" value={row.qty}
-                onChange={(e) => setBasket((b) => b.map((x, j) => (j === i ? { ...x, qty: e.target.value } : x)))}
-              />
-              <button
-                type="button" className="etfx-btn sm ghost danger" aria-label="Zeile entfernen" disabled={basket.length <= 1}
-                onClick={() => setBasket((b) => b.filter((_, j) => j !== i))}
-              >×</button>
+      <Sheet
+        open={Boolean(draft)}
+        onClose={close}
+        title={`${draft ? draft.ticker : ''} anlegen?`}
+        footer={(
+          <>
+            <Button variant="ghost" onClick={close} disabled={saving}>Abbrechen</Button>
+            <Button onClick={submit} loading={saving} disabled={dShort.length > 0}>Anlegen</Button>
+          </>
+        )}
+      >
+        {draft ? (
+          <div className="admin-form">
+            <div className="admin-kv admin-etf-kv">
+              <div><span>Kürzel und Name</span><strong>{draft.ticker} · {draft.name}</strong></div>
+              {draft.desc ? <div><span>Beschreibung</span><span>{draft.desc}</span></div> : null}
+              <div><span>Aktien je Anteil · Anteile bei Start</span><span>{fmtI(draft.spu)} · {fmtI(draft.units)}</span></div>
+              <div><span>Gesamtwert des Korbs je Anteil</span><Money c={dValue} /></div>
+              <div><span>Bei {fmtI(draft.units)} Anteilen</span><Money c={dValue * draft.units} /></div>
+              <div>
+                <span>Davon besitzt die Staatskasse</span>
+                <span className={dShort.length ? 'neg' : undefined}>
+                  {dHoldings.map((h) => `${fmtI(Math.min(h.have, h.need))} von ${fmtI(h.need)} Stück ${h.ticker}`).join(', ')}
+                </span>
+              </div>
             </div>
-          ))}
-          <button type="button" className="etfx-btn sm ghost" onClick={() => setBasket((b) => [...b, { stock_id: '', qty: '' }])}>+ Zeile</button>
-          <div className="etfx-submit">
-            <ConfirmBtn
-              className="primary block" disabled={busy || problems.length > 0}
-              label="ETF erstellen" armedLabel="Anlegen? Erneut klicken" onConfirm={submit}
-            />
+            {dShort.length ? (
+              <p className="admin-etf-lock" role="alert">
+                Anlegen ist gesperrt. {dShortage} Gib die Anteile bei Start kleiner oder wähl weniger Stück.
+              </p>
+            ) : (
+              <p className="admin-note">Die Staatskasse besitzt den Korb. Beim Anlegen werden die Aktien aus ihrem Depot in den ETF gelegt.</p>
+            )}
+            <ErrorBox>{dlgErr}</ErrorBox>
           </div>
-        </>
-      )}
-    </section>
+        ) : null}
+      </Sheet>
+    </div>
   );
 }

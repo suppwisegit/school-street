@@ -1,0 +1,292 @@
+/* Handel — nur Variablen aus DESIGN.md. */
+.btn.trade-back {
+  display: none;
+}
+
+.trade-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0 16px;
+}
+
+.trade-id {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.trade-tk {
+  font-family: var(--ss-font-num);
+  font-size: var(--ss-fs-lg);
+  font-weight: 800;
+}
+
+.trade-quote {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex: none;
+}
+
+.trade-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 24px;
+}
+
+.trade-chart-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* Beide Umschalter nach Inhalt: „Kerzen“, „Linie“, „1T/1W/1M“ nie abschneiden */
+.trade-chart-tools .seg {
+  flex: 0 0 auto;
+}
+
+.trade-chart-tools .seg-btn {
+  flex: 0 0 auto;
+}
+
+.trade-canvas {
+  position: relative;
+  height: 280px;
+}
+
+.trade-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.trade-quick {
+  display: flex;
+  gap: 8px;
+}
+
+.trade-quick .btn {
+  flex: 1 1 0;
+}
+
+.trade-form,
+.trade-done {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.trade-form > p,
+.trade-done > p {
+  margin: 0;
+}
+
+/* Die Vorschau behält immer ihren Platz (vier Zeilen), egal ob leer, veraltet oder aktuell:
+   das Sheet springt beim Ändern der Stückzahl weder in der Höhe noch in der Position. */
+.trade-preview {
+  display: flex;
+  flex-direction: column;
+  min-height: 184px;
+  border-top: 1px solid var(--ss-line);
+  transition: opacity var(--ss-dur-fast) var(--ss-ease);
+}
+
+.trade-preview.is-stale {
+  opacity: 0.5;
+}
+
+/* Vorschau-Zeilen etwas flacher als im Rest der App: Das Sheet passt so auch in
+   ein niedriges Fenster und aufs Handy, ohne im Sheet zu scrollen. */
+.trade-preview .row {
+  min-height: 46px;
+}
+
+.trade-total {
+  font-size: var(--ss-fs-xl);
+  font-weight: 700;
+}
+
+.trade-done-title {
+  font-size: var(--ss-fs-md);
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.trade-pause {
+  margin: 0;
+  padding: 0 0 12px;
+}
+
+@media (max-width: 1023px) {
+  .btn.trade-back {
+    display: inline-flex;
+    margin-top: 8px;
+  }
+}
+
+/* Erweiterte Ansicht: Kennzahlen, Orderbuch, Trades, Umsatz nach Preis */
+.pro-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (min-width: 720px) {
+  .pro-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: 32px;
+  }
+}
+
+.pro-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  align-items: center;
+  border-bottom: 1px solid var(--ss-line);
+  font-size: var(--ss-fs-sm);
+}
+
+.pro-item .num {
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.pro-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (min-width: 720px) {
+  .pro-cols {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 32px;
+  }
+}
+
+.pro-head,
+.ob-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 5.5em 5.5em;
+  align-items: center;
+  gap: 8px;
+}
+
+.pro-head {
+  min-height: 32px;
+  padding: 0 6px;
+  font-size: var(--ss-xs);
+  font-weight: 600;
+  color: var(--ss-text-3);
+  border-bottom: 1px solid var(--ss-line-strong);
+}
+
+.pro-head span:nth-child(n + 2) {
+  text-align: right;
+}
+
+.ob-row {
+  position: relative;
+  min-height: 36px;
+  padding: 0 6px;
+  font-size: var(--ss-fs-sm);
+  border-bottom: 1px solid var(--ss-line);
+}
+
+/* Nur die drei Textspalten liegen über dem Balken; der Balken selbst bleibt absolut
+   positioniert und belegt keine Rasterspalte. */
+.ob-row > span:not(.ob-fill) {
+  position: relative;
+}
+
+.ob-row > span:nth-child(n + 3) {
+  text-align: right;
+}
+
+.ob-fill {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  border-radius: 999px;
+  opacity: 0.16;
+}
+
+.ob-fill.bid {
+  background: var(--ss-up);
+}
+
+.ob-fill.ask {
+  background: var(--ss-down);
+}
+
+.ob-mid {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  font-size: var(--ss-fs-sm);
+  color: var(--ss-text-2);
+  border-bottom: 1px solid var(--ss-line-strong);
+}
+
+.tp-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--ss-line);
+  font-size: var(--ss-fs-sm);
+}
+
+.tp-price {
+  min-width: 4.5em;
+  font-weight: 700;
+}
+
+.tp-row > span:last-child {
+  margin-left: auto;
+}
+
+.vp-row {
+  display: grid;
+  grid-template-columns: 5.5em minmax(0, 1fr) 5.5em;
+  align-items: center;
+  gap: 12px;
+  min-height: 32px;
+  font-size: var(--ss-fs-sm);
+}
+
+.vp-row > span:last-child {
+  text-align: right;
+}
+
+.vp-bar {
+  display: block;
+  height: 10px;
+}
+
+.vp-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  opacity: 0.75;
+}
+
+.vp-fill.bid {
+  background: var(--ss-up);
+}
+
+.vp-fill.ask {
+  background: var(--ss-down);
+}

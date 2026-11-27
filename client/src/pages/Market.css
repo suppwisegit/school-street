@@ -1,0 +1,234 @@
+/* Markt: Suche und Filter, darunter die Liste. Nur Tokens aus DESIGN.md. */
+
+.mkt {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Suche und Filter: nebeneinander, wenn es reicht, sonst untereinander. */
+.mkt-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 16px;
+}
+.mkt-search {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.mkt-search > input {
+  font: inherit;
+}
+.mkt-filter {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.mkt-filter > * {
+  width: auto;
+}
+.mkt-filter .seg-btn {
+  flex: 0 0 auto; /* nach Inhalt: „Gewinner“ und „Verlierer“ nie abschneiden */
+}
+
+/* Zeilen laufen bis zum Bildschirmrand, ihr Inhalt beginnt am Seitenrand. */
+.page.mkt > .mkt-flash {
+  padding-inline: 0;
+}
+/* Die Zeile liegt schon im randvollen Flash: nur Innenabstand, kein zweiter
+   negativer Außenabstand (sonst klebt der Text am Bildschirmrand). */
+.mkt-flash > .mkt-row {
+  padding-inline: var(--ss-gutter);
+}
+
+/* Eine Zeile: Kürzel + Name links, Kurve und Kurs rechts. */
+.mkt-id {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.mkt-side {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 16px;
+}
+.mkt-spark {
+  display: grid;
+  place-items: center;
+  width: 56px; /* bleibt frei, bis die Kurve da ist — nichts springt */
+  height: 28px;
+}
+.mkt-quote {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 84px;
+  text-align: right;
+  line-height: 1.05;
+}
+.mkt-last {
+  font-size: var(--ss-fs-base);
+  font-weight: 700;
+  color: var(--ss-text);
+}
+.mkt-chg {
+  font-size: var(--ss-fs-sm);
+  font-weight: 600;
+}
+
+/* Hinweis, wenn nur die Kurven (nicht die Kurse) fehlen. */
+.mkt-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  color: var(--ss-text-2);
+  font-size: var(--ss-fs-sm);
+}
+
+/* Nur für Screenreader: Trefferzahl bei Suche und Filter. */
+.mkt-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Börsengang (IpoSection.jsx, DESIGN 11.2–11.5): ein Block mit eigener Fläche zwischen
+   Filter und Werteliste — fällt auf, ohne Farbe: Leiste 2 px in --ss-white auf --ss-line.
+   Ohne neuen Wert rendert der Abschnitt nichts. */
+.page > .sec.ipo {
+  margin-inline: 0;
+  margin-top: calc(var(--ss-gutter) / 4);
+  padding: 0 var(--ss-gutter) calc(var(--ss-gutter) / 2);
+  border: 1px solid var(--ss-line);
+  border-radius: var(--ss-radius);
+  background: var(--ss-surface);
+}
+.ipo-count {
+  font-size: var(--ss-fs-xs);
+  color: var(--ss-text-3);
+  white-space: nowrap;
+}
+.ipo-item:last-child .ipo-life {
+  border-bottom: 0;
+}
+/* Zwei Zeilen unter dem Kürzel (DESIGN 11.2: Kürzel und Name oben, Zustandtext darunter, Kurs und
+   Aktion rechts). Raster statt Nebeneinander: in der 380-px-Spalte der Aktienseite lief der Text
+   sonst durch den Namen, der Name in die Kurszahl. */
+.row.ipo-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "lead trail"
+    "text trail";
+  column-gap: 12px;
+  row-gap: 2px;
+  min-height: calc(var(--ss-row-h) - 8px); /* 48: dichter als die Werteliste */
+  padding: calc(var(--ss-gutter) / 4) 0 4px;
+  border-bottom: 0;
+}
+/* Ohne `title` trägt die Kürzel-Spalte die Klasse row-text (ui.jsx Row): das Symbol selbst sitzt im Rasterfeld. */
+.ipo-row > .row-text:first-child {
+  grid-area: lead;
+  min-width: 0; /* Name wird mit Auslassung gekürzt, nicht überdeckt */
+  overflow: hidden;
+}
+.ipo-row .sym { max-width: 100%; }
+.ipo-row .row-text {
+  grid-area: text;
+  padding-left: 0;
+}
+.ipo-row .row-trail {
+  grid-area: trail;
+  margin-left: 0;
+}
+/* Schmal: der Zustandtext läuft unter Kürzel und Kurs durch, damit Alter und Bezugskurs vollständig
+   stehen; das Etikett „Erster Handel“ entfällt (der Abschnitt sagt es). */
+@media (max-width: 719px) { /* --ss-bp-pc minus 1; var() ist in Medienabfragen nicht erlaubt */
+  .row.ipo-row {
+    grid-template-areas:
+      "lead trail"
+      "text text";
+  }
+  .ipo-row .sym-sub {
+    display: none !important;
+  }
+  .ipo-side {
+    gap: 8px;
+  }
+  .ipo-side .btn.sm {
+    padding: 0 12px;
+  }
+}
+
+.ipo-quote {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.05;
+}
+.ipo-last {
+  font-size: var(--ss-fs-md);
+  font-weight: 700;
+  color: var(--ss-text);
+}
+.ipo-chg {
+  font-size: var(--ss-fs-xs);
+  font-weight: 600;
+}
+/* Verstrichene Zeit als „neu“: Uhrzeit links, Leiste rechts. Lücken wie in .row (styles.css). Nur die Uhrzeit trägt
+   im letzten Stück Warnfarbe — kein Blinken, keine Stempel. */
+.ipo-life {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0 10px;
+  border-bottom: 1px solid var(--ss-line);
+}
+.ipo-until {
+  flex: none;
+  font-size: var(--ss-fs-xs);
+  font-weight: 600;
+  color: var(--ss-text-3);
+}
+.ipo-until.warn {
+  color: var(--ss-warn);
+}
+.ipo-bar {
+  flex: 1;
+  min-width: 0;
+  height: 2px;
+  background: var(--ss-line);
+}
+.ipo-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--ss-white);
+}
+
+/* Mehr Börsengänge als Zeilen: die übrigen stehen mit Marker in der Liste. */
+.ipo-more {
+  padding: calc(var(--ss-gutter) / 2) 0 calc(var(--ss-gutter) / 4);
+  font-size: var(--ss-fs-sm);
+  color: var(--ss-text-3);
+}
+
+/* Aktion je Zeile (DESIGN 11.2 „Handeln“): rechts neben Kurs und Änderung — die Zeile bleibt
+   so niedrig wie eine Zeile der Werteliste. */
+.ipo-side {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.ipo-side .btn.sm {
+  min-height: 36px;
+}

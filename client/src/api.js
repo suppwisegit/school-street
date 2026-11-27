@@ -15,8 +15,8 @@ export const credsToCent = (v) => Math.round(parseFloat(String(v ?? '').replace(
 // Cents -> anzeigbarer Credits-String (de-DE: Tausenderpunkte, 2 Nachkommastellen)
 const CUR_FMT = new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 export const fmtC = (c) => CUR_FMT.format((Number(c) || 0) / 100);
-// Tick-Größe: Aktie 100 Cent, ETF 10 Cent
-export const tickOf = (type) => (type === 'etf' ? 10 : 100);
+// Tick-Größe: 10 Cent für Aktien und ETFs
+export const tickOf = () => 10;
 export const snapToTick = (cents, type) => Math.max(tickOf(type), Math.round(cents / tickOf(type)) * tickOf(type));
 
 export async function api(path, { method = 'GET', body, params, token } = {}) {

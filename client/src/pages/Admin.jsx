@@ -1,74 +1,81 @@
-// Admin-Panel der Investment AG: eigenes Login (nur role=admin), Tab-Navigation.
+// Admin-Panel „Börse verwalten": eigene Shell mit Login (nur role=admin) und Leiste oben.
+// Die Routen legt App.jsx. Default-Export = Shell, die vier Bereiche sind benannte Exporte.
 import React, { useCallback, useEffect, useState } from 'react';
-import {
-  IconBuildingBank, IconCoin, IconFileText, IconNews, IconRobot, IconRocket, IconSettings, IconTrendingUp, IconUsers
-} from '@tabler/icons-react';
+import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { api, ADMIN_TOKEN_KEY } from '../api.js';
-import { ErrorBox, Field, Loading, useToast } from '../ui.jsx';
-import AdminOverview from './admin/AdminOverview.jsx';
-import AdminIpo from './admin/AdminIpo.jsx';
-import AdminRequests from './admin/AdminRequests.jsx';
+import { Button, ErrorBox, Field, Input, Loading, useToast } from '../ui.jsx';
+import AdminGame from './admin/AdminGame.jsx';
 import AdminNews from './admin/AdminNews.jsx';
-import AdminDividend from './admin/AdminDividend.jsx';
-import AdminEtf from './admin/AdminEtf.jsx';
+import AdminSecurities from './admin/AdminSecurities.jsx';
 import AdminUsers from './admin/AdminUsers.jsx';
-import AdminBots from './admin/AdminBots.jsx';
-import AdminSettings from './admin/AdminSettings.jsx';
+import './Admin.css';
 
-const TABS = [
-  { key: 'overview', label: 'Übersicht', Icon: IconTrendingUp, comp: AdminOverview },
-  { key: 'ipo', label: 'IPO', Icon: IconRocket, comp: AdminIpo },
-  { key: 'requests', label: 'Anträge', Icon: IconFileText, comp: AdminRequests },
-  { key: 'news', label: 'News', Icon: IconNews, comp: AdminNews },
-  { key: 'dividend', label: 'Dividende', Icon: IconCoin, comp: AdminDividend },
-  { key: 'etf', label: 'ETF / AP', Icon: IconBuildingBank, comp: AdminEtf },
-  { key: 'users', label: 'Nutzer', Icon: IconUsers, comp: AdminUsers },
-  { key: 'bots', label: 'Bots', Icon: IconRobot, comp: AdminBots },
-  { key: 'settings', label: 'Einstellungen', Icon: IconSettings, comp: AdminSettings }
+export { AdminGame, AdminNews, AdminSecurities, AdminUsers };
+
+const AREAS = [
+  { key: 'spiel', to: '/admin/spiel', label: 'Spiel' },
+  { key: 'news', to: '/admin/news', label: 'News' },
+  { key: 'werte', to: '/admin/werte', label: 'Werte' },
+  { key: 'nutzer', to: '/admin/nutzer', label: 'Nutzer' },
 ];
 
 export default function AdminApp() {
+  const toast = useToast();
+  const { pathname } = useLocation();
+  // Aktiver Bereich aus der Adresse; /admin allein zählt als Spiel
+  const cur = pathname.replace(/\/+$/, '').split('/')[2] || 'spiel';
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState('overview');
-  const [username, setUsername] = useState('');
+  const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
-  const toast = useToast();
 
-  const A = useCallback((path, opts = {}) => api(path, { ...opts, token: localStorage.getItem(ADMIN_TOKEN_KEY) }), []);
+  // Request-Wrapper mit Admin-Token (die Bereiche bekommen ihn über den Outlet-Context)
+  const A = useCallback(
+    (path, opts = {}) => api(path, { ...opts, token: localStorage.getItem(ADMIN_TOKEN_KEY) }),
+    [],
+  );
 
+  // Fassung „admin" am <html>-Element (schaltet die Tokens); beim Verlassen wieder weg
+  useEffect(() => {
+    const root = document.documentElement;
+    root.setAttribute('data-view', 'admin');
+    return () => root.removeAttribute('data-view');
+  }, []);
+
+  // Gespeicherten Sitzung prüfen
   useEffect(() => {
     let alive = true;
-    (async () => {
-      const t = localStorage.getItem(ADMIN_TOKEN_KEY);
-      if (!t) { setLoading(false); return; }
-      try {
-        const r = await api('/api/auth/me', { token: t });
+    const t = localStorage.getItem(ADMIN_TOKEN_KEY);
+    if (!t) { setLoading(false); return undefined; }
+    api('/api/auth/me', { token: t })
+      .then((r) => {
         if (!alive) return;
-        if (r.user.role !== 'admin') { localStorage.removeItem(ADMIN_TOKEN_KEY); setErr('Dieser Zugang ist kein Admin-Konto.'); }
-        else setUser(r.user);
-      } catch {
-        localStorage.removeItem(ADMIN_TOKEN_KEY);
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
+        if (!r.user || r.user.role !== 'admin') {
+          localStorage.removeItem(ADMIN_TOKEN_KEY);
+          setErr('Dieses Konto darf die Börse nicht verwalten.');
+        } else setUser(r.user);
+      })
+      .catch(() => localStorage.removeItem(ADMIN_TOKEN_KEY))
+      .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, []);
 
   const login = async (e) => {
     e.preventDefault();
-    setErr(''); setBusy(true);
+    setErr('');
+    setBusy(true);
     try {
-      const r = await api('/api/auth/login', { method: 'POST', body: { username: username.trim(), password } });
-      if (r.user.role !== 'admin') {
-        setErr('Kein Admin-Zugang. Dieses Konto ist ein Trader-Konto – hier langt nur die Investment AG.');
+      const r = await api('/api/auth/login', { method: 'POST', body: { username: name.trim(), password } });
+      if (!r.user || r.user.role !== 'admin') {
+        // Sitzung eines Spieler-Kontos nicht offen lassen
+        api('/api/auth/logout', { method: 'POST', token: r.token }).catch(() => {});
+        setErr('Das ist ein Spieler-Konto. Nur die Investment-AG darf die Börse verwalten.');
       } else {
         localStorage.setItem(ADMIN_TOKEN_KEY, r.token);
         setUser(r.user);
-        toast('Investment AG eingeloggt', 'ok');
+        toast('Du bist drin.', 'ok');
       }
     } catch (e2) {
       setErr(e2.message);
@@ -78,62 +85,75 @@ export default function AdminApp() {
   };
 
   const logout = async () => {
-    try { await A('/api/auth/logout', { method: 'POST' }); } catch {}
+    try { await A('/api/auth/logout', { method: 'POST' }); } catch { /* Token wird sowieso verworfen */ }
     localStorage.removeItem(ADMIN_TOKEN_KEY);
     setUser(null);
+    setName('');
+    setPassword('');
+    toast('Ausgeloggt.', 'info');
   };
 
-  if (loading) return <Loading label="Investment AG …" />;
+  if (loading) return <div className="admin-shell"><Loading label="Dein Login wird geprüft …" /></div>;
 
   if (!user) {
     return (
-      <div className="loginwrap">
-        <div className="logincard">
-          <div className="loginbrand">
-            <div className="bigmark"><IconBuildingBank stroke={2} /></div>
-            <h1>INVESTMENT AG</h1>
-            <p>Börsenaufsicht · Zentralbank · ETF-AP</p>
-          </div>
-          <div className="card">
+      <div className="admin-shell">
+        <main className="admin-login">
+          <h1>Börse verwalten</h1>
+          <form onSubmit={login}>
             <ErrorBox>{err}</ErrorBox>
-            <form onSubmit={login}>
-              <Field label="Admin-Username">
-                <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
-              </Field>
-              <Field label="Passwort">
-                <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
-              </Field>
-              <button className="btn primary block xl" disabled={busy} type="submit">{busy ? 'Bitte warten …' : 'Anmelden'}</button>
-            </form>
-            <div className="small muted center" style={{ marginTop: 10 }}><a href="/">← Zur Spieler-App</a></div>
-          </div>
-        </div>
+            <Field label="Name" htmlFor="admin-name">
+              <Input
+                id="admin-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                autoComplete="username"
+                autoCapitalize="none"
+                spellCheck={false}
+              />
+            </Field>
+            <Field label="Passwort" htmlFor="admin-pass">
+              <Input
+                id="admin-pass"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+              />
+            </Field>
+            <Button type="submit" size="lg" full loading={busy} disabled={!name.trim() || !password}>
+              Rein
+            </Button>
+          </form>
+          <Link className="admin-back" to="/">Zur Spieler-App</Link>
+        </main>
       </div>
     );
   }
 
-  const Active = TABS.find((t) => t.key === tab)?.comp || AdminOverview;
   return (
     <div className="admin-shell">
       <header className="admin-head">
-        <div className="title">
-          <span className="brandmark"><IconBuildingBank stroke={1.9} /></span>
-          Investment AG <span className="muted small">| School-Street</span>
-        </div>
-        <nav className="admin-nav">
-          {TABS.map((t) => (
-            <button key={t.key} className={tab === t.key ? 'on' : ''} onClick={() => setTab(t.key)}>
-              <t.Icon size={15} stroke={1.9} /> {t.label}
-            </button>
+        <Link className="admin-brand" to="/admin/spiel">Börse verwalten</Link>
+        <nav className="admin-nav" aria-label="Bereiche">
+          {AREAS.map((a) => (
+            <NavLink
+              key={a.key}
+              to={a.to}
+              className={cur === a.key ? 'on' : ''}
+              aria-current={cur === a.key ? 'page' : undefined}
+            >
+              {a.label}
+            </NavLink>
           ))}
         </nav>
-        <div className="row" style={{ gap: 8 }}>
-          <span className="chip">{user.username}</span>
-          <button className="btn sm ghost" onClick={logout}>Logout</button>
+        <div className="admin-user">
+          <span className="small muted">{user.username}</span>
+          <Button variant="ghost" size="sm" onClick={logout}>Ausloggen</Button>
         </div>
       </header>
-      <main className="admin-body">
-        <Active A={A} toast={toast} />
+      <main className="admin-main">
+        <Outlet context={{ A }} />
       </main>
     </div>
   );

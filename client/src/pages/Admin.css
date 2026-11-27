@@ -1,0 +1,160 @@
+/* Admin-Panel „Börse verwalten": Kopfzeile mit Leiste oben, Meldefeld, Einstellungszeilen.
+   Nur Variablen aus DESIGN.md — keine eigenen Farben, Schatten oder Verläufe. */
+
+.admin-shell { min-height: 100vh; display: flex; flex-direction: column; }
+
+.admin-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px;
+  min-height: 56px; padding: 8px var(--ss-gutter);
+  border-bottom: 1px solid var(--ss-line);
+}
+.admin-brand {
+  font-family: var(--ss-font-num); font-weight: 800; font-size: var(--ss-fs-md);
+  color: var(--ss-text); text-decoration: none; white-space: nowrap;
+}
+.admin-nav { display: flex; flex-wrap: wrap; gap: 4px; }
+.admin-nav a {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px;
+  border-radius: var(--ss-radius-ctl);
+  color: var(--ss-text-2); font-size: var(--ss-fs-base); font-weight: 600; text-decoration: none;
+  transition: background var(--ss-dur-fast) var(--ss-ease), color var(--ss-dur-fast) var(--ss-ease);
+}
+.admin-nav a:hover { background: var(--ss-surface); color: var(--ss-text); }
+.admin-nav a.on { background: var(--ss-surface-2); color: var(--ss-text); }
+.admin-nav a:focus-visible,
+.admin-brand:focus-visible,
+.admin-back:focus-visible { outline: 2px solid var(--ss-white); outline-offset: 2px; }
+
+.admin-user { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+.admin-main {
+  flex: 1; width: 100%;
+  max-width: calc(var(--ss-max-w) + 2 * var(--ss-gutter));
+  margin: 0 auto; padding: 16px var(--ss-gutter) 48px;
+}
+@media (min-width: 720px) {
+  .admin-main { padding-top: 24px; }
+}
+
+.admin-areas { display: flex; flex-direction: column; gap: 32px; }
+.admin-form { display: flex; flex-direction: column; gap: 16px; max-width: 560px; }
+
+/* Bedienelemente am Zeilenende: Eingabe, Einheit, Schaltfläche */
+.admin-ctl { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.admin-quote { min-width: 15rem; font-size: var(--ss-fs-base); }
+/* Kürzel und Name in einer Zeile: der Name endet mit Auslassung, statt aus der Zeile zu laufen.
+   .sym schrumpft von selbst nicht (styles.css), hier bekommt es die Breite der Textspalte. */
+.admin-areas .row-text > .sym { max-width: 100%; }
+/* Schmales Fenster: Kurs, Veränderung, Chip und Schaltfläche dürfen umbrechen, damit der Name
+   genug Platz behält. */
+@media (max-width: 719px) {
+  .admin-quote { min-width: 0; max-width: 60%; row-gap: 4px; }
+}
+.admin-ctl .admin-money { width: 9rem; text-align: right; }
+
+/* Einstellungszeilen: der Hilfesatz bleibt vollständig (bricht um), das Bedienelement
+   rückt auf schmalen Fenstern in die zweite Zeile. */
+.admin-set > .row-text { flex: 1 1 16rem; }
+.admin-set > .row-sub { white-space: normal; }
+
+.admin-note { margin: 0; color: var(--ss-text-2); font-size: var(--ss-fs-sm); line-height: 1.45; }
+
+.admin-search { width: min(240px, 40vw); }
+
+/* Zahlenpaare im Sheet (Vorschau) */
+.admin-kv { display: flex; flex-direction: column; }
+.admin-kv > div {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+  min-height: 40px; padding: 8px 0;
+  border-bottom: 1px solid var(--ss-line);
+  font-size: var(--ss-fs-base);
+}
+
+/* Meldefeld: eine Spalte */
+.admin-login {
+  flex: 1; width: 100%;
+  max-width: calc(var(--ss-gutter) * 2 + 360px);
+  margin: 0 auto; padding: 24px var(--ss-gutter);
+  display: flex; flex-direction: column; justify-content: center; gap: 24px;
+}
+.admin-login h1 {
+  margin: 0; font-family: var(--ss-font-num); font-weight: 800;
+  font-size: var(--ss-fs-xl); line-height: 1.05;
+}
+.admin-login form { display: flex; flex-direction: column; gap: 16px; }
+.admin-back { color: var(--ss-text-2); font-size: var(--ss-fs-sm); }
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-nav a { transition: none; }
+}
+
+/* Admin „Werte": Abschnitt „Neuer ETF" (AdminEtf.jsx) — Formular links, Vorschau des Korbs rechts. */
+.admin-etf-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--ss-gutter); }
+@media (min-width: 720px) {
+  .admin-etf-grid { grid-template-columns: minmax(0, 560px) minmax(0, 1fr); align-items: start; }
+}
+.admin-etf-grid .admin-form { max-width: none; }
+
+/* Zusammensetzung: eine Zeile je Aktie, der Stepper rechts */
+.admin-etf-basket { display: flex; flex-direction: column; }
+.admin-etf-pos { padding-block: 0; }
+.admin-etf-pos > .row-text { min-width: 0; }
+.admin-etf-pos > .row-trail { margin-left: var(--ss-gutter); }
+.admin-etf-pos .stepper { flex: none; }
+.admin-etf-pos .sym-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Schmales Fenster: der Stepper rückt unter die Aktie, damit Bestand und Bedarf lesbar bleiben */
+@media (max-width: 719px) {
+  .admin-etf-pos { flex-wrap: wrap; row-gap: 8px; padding-block: 8px; }
+  .admin-etf-pos > .row-trail { width: 100%; margin-left: 0; }
+}
+@media (min-width: 720px) {
+  .admin-etf-pos .stepper { width: 15rem; }
+}
+
+.admin-etf-submit { display: flex; flex-direction: column; gap: 8px; } /* 4-px-Raster aus DESIGN §4 */
+/* Pflichtfelder leer: ausgegraut wie ein deaktivierter Knopf, aber bedienbar (der Klick erklärt, was fehlt) */
+.admin-etf-submit .btn.admin-etf-incomplete { opacity: 0.5; }
+
+/* Vorschau: Kürzel groß, NAV je Anteil rechts, Summenzeile mit fester Linie oben */
+.admin-etf-preview .empty { padding: 24px 0; }
+.admin-etf-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: var(--ss-gutter);
+  padding: 8px 0 var(--ss-gutter);
+}
+.admin-etf-title, .admin-etf-nav { min-width: 0; }
+.admin-etf-name {
+  font-size: var(--ss-fs-base); font-weight: 600; line-height: 1.45; color: var(--ss-text-2);
+  overflow-wrap: anywhere;
+}
+.admin-etf-nav { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; text-align: right; flex: none; }
+.admin-etf-sum {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--ss-gutter);
+  padding: 12px 0; border-top: 1px solid var(--ss-line-strong);
+  font-size: var(--ss-fs-base); font-weight: 600;
+}
+.admin-etf-preview > .admin-note { margin-top: var(--ss-gutter); }
+
+/* Bestätigungsdialog: Sperr-Grund bei Bestandsmangel */
+.admin-etf-lock {
+  margin: 0; color: var(--ss-down); font-size: var(--ss-fs-base); font-weight: 600; line-height: 1.45;
+}
+
+/* Zahlenpaare im Dialog: fester Labelbereich, Wert rechts, beides bricht um */
+.admin-etf-kv > div > :first-child { flex: 0 0 11rem; }
+.admin-etf-kv > div > :last-child { text-align: right; overflow-wrap: anywhere; }
+
+/* Umschalter in Einstellungszeilen („Schnellmodus“): die Beschriftung gibt die Breite vor —
+   mit flex-basis 0 (.seg-btn) maß der Umschalter null Breite und zeigte „A… An“. */
+.admin-set .seg-btn { flex: 0 0 auto; }
+
+/* Schmales Fenster (< 720 px): das Bedienelement einer Einstellungszeile rückt unter den Text und nimmt
+   die volle Breite. Nebeneinander lief die Zeile aus dem Bildschirm (Zähler mit 400 px Mindestbreite plus
+   Schaltfläche: 539 px; Nutzerzeile mit vier Schaltflächen: 614 px bei 375 px Fenster). */
+@media (max-width: 719px) {
+  .admin-areas .row:has(.admin-ctl) { flex-wrap: wrap; row-gap: 8px; }
+  .admin-areas .row:has(.admin-ctl) > .row-trail { flex: 1 1 100%; max-width: 100%; margin-left: 0; align-items: stretch; }
+  .admin-areas .row .admin-ctl { width: 100%; min-width: 0; justify-content: flex-start; }
+  .admin-set .admin-ctl > .stepper { flex: 1 1 100%; min-width: 0; }
+  .admin-set .admin-ctl > .btn { flex: 1 1 auto; }
+  .admin-set .admin-ctl > .seg { flex: 1 1 auto; }
+}
